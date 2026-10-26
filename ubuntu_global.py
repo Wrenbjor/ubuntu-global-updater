@@ -55,6 +55,10 @@ def need(value, code):
     if not value:
         raise UpdateError(code)
 
+def error_code(error):
+    known = (UpdateError, guard.PolicyError, unattended.HandoffError, os_upgrade.OSHold, early.EarlyError)
+    return str(error) if isinstance(error, known) else type(error).__name__
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -552,7 +556,7 @@ def worker():
         run(['/bin/systemctl', 'disable', UNIT])
         emit('updater', 'completed', report=str(BASE / 'report.json'))
     except Exception as error:
-        code = str(error) if isinstance(error, (UpdateError, guard.PolicyError, unattended.HandoffError)) else type(error).__name__
+        code = error_code(error)
         state_update(state, status='failed-needs-review', error=code)
         emit('updater', 'failed-needs-review', reason=code)
         run(['/bin/systemctl', 'disable', UNIT], check=False)
@@ -644,7 +648,7 @@ def run_os(state, snap):
         remove_guard(proof)
     return 'waiting-reboot'
 
-def launch():
+def launch_locked():
     need(os.geteuid() == 0, 'root_required')
     current = identity()
     need(digest(current['hostname'].lower().split('.', 1)[0].encode()) != '2c828ee62ed7f0f6ba7da40f2cabedb4b1744f78bdb94115daf502dae4079df5', 'host_marked_for_replacement')
@@ -673,6 +677,25 @@ def launch():
     run(['/bin/systemctl', 'start', '--no-block', UNIT])
     print('Updater started. Status: ubuntu-global-updater.sh --status')
 
+def launch():
+    need(os.geteuid()==0,'root_required')
+    private_directory(BASE)
+    inherited=os.environ.get('VISIONLINE_INSTALLER_FD')
+    if inherited is not None:
+        need(inherited.isdecimal(),'invalid_inherited_installer_lock')
+        fd=int(inherited)
+        need(fd>=3,'invalid_inherited_installer_lock')
+    else:
+        fd=os.open(str(BASE/'installer.lock'),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    try:
+        actual=os.fstat(fd);named=(BASE/'installer.lock').lstat()
+        need(stat.S_ISREG(actual.st_mode) and actual.st_uid==0 and not actual.st_mode&0o077 and actual.st_nlink==1
+             and (actual.st_dev,actual.st_ino)==(named.st_dev,named.st_ino),'unsafe_or_replaced_admission_lock')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        launch_locked()
+    finally:
+        os.close(fd)
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     mode = p.add_mutually_exclusive_group()
@@ -698,5 +721,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        print(json.dumps(dict(status='stopped', reason=str(error) if isinstance(error, UpdateError) else type(error).__name__)))
+        print(json.dumps(dict(status='stopped', reason=error_code(error))))
         raise SystemExit(1)

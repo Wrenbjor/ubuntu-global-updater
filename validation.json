@@ -1,23 +1,22 @@
 {
-  "Canonical_signed_Focal_upgrader_API_tested": true,
-  "actual_Python36_bootstrap_tested": true,
-  "actual_Python36_fixture_installation": false,
   "errors": 0,
   "failures": 0,
   "live_OS_upgrade_tested": false,
   "live_PHP_migration_tested": false,
   "production_connections": 0,
-  "regression_note": "Existing OS negative-release fixture updated from18.04 to16.04; all other native transaction/boot tests preserved.",
+  "regression_note": "Existing v2 regression suite retargeted to hotfix modules and bundle; adds duplicate directive and prelaunch installer/admission fixtures. No production commands executed.",
   "schema": 2,
   "skipped": 0,
   "source_sha256": {
-    "README.md": "7ee975f975c06762cf9204bbf50cb99ced62c9b9f85760aa8d9d31f5730df179",
-    "install.sh": "18c818d45d4f957c174175e81ba84399cfaa9648104692bac2220c4ed7aa8ae6",
+    "README.md": "faf81ac9e81450cda7ffffa43cdd9710d39e7407b4e1fd7754e187660a062f8a",
+    "fpm_pool_parser.py": "f2bcd43183791c1f1cb2b4affc17a232ee2184494b16fb9a441f824f36bca00a",
+    "install.sh": "a03f9fc581721170e33569eb449b5800348ad7e8edf775d264557b817c60e354",
     "php_legacy_packages.py": "5a081fc018b709b98717d9226d91c2f7971d58ea0ad5480ebb1dd8fdb47abadb",
-    "php_legacy_routing.py": "c095461d772a6c51cbe6abf970a7d4eee9b84f5916ebb804401f9da25f13a2b1",
+    "php_legacy_routing.py": "a92b5cf952f77def23e32adfbac5aea540635b2eddd2872ebbdce4dec8e93e79",
     "php_legacy_runner.py": "004968bde0604bc547725128fb913e6a47bd706a4401e41a916ec59453c9e12d",
-    "ubuntu_global.py": "f5998309daa623bfa1bd267133ffeed9138d3f08d2c12a968f057df97ad9c17c",
-    "ubuntu_global_early.py": "718b7e33f55431a54dcaf668e63f3466ecb45acd3f4375f4c12c92da9c15d319",
+    "prelaunch_installer.py": "a5c7dead72bbe948f78c60882a86792efbea0086242e5a76ad7c8b8c1846bcf0",
+    "ubuntu_global.py": "80673674eb997fe9891a811c5fe83e75c1af5a89dd76644d244102f59504f146",
+    "ubuntu_global_early.py": "ac8f31953152ff83c60043fd553833db0280a2c8a7214d16195653d60ab4cdce",
     "ubuntu_global_guard.py": "1c8598ffea8b22a2664eecf38d38025cfbd9dcf61f94ecfdf351454bc0d5d93d",
     "ubuntu_global_handoff.py": "dc0886dfe15bce3d36e7d2fb193ec763754ebb630f0f59b1047e25266ddf2bae",
     "ubuntu_global_os.py": "bac68df386f55716765c49ac17f0b8920bcbee91572f3773f9ea2ac7113d7035",
@@ -25,7 +24,7 @@
     "ubuntu_global_support.py": "d7c6ad7674e620f1ab84a40287be162706810abcf940aa418cb4e1df96d5f402",
     "unattended_handoff_v7.py": "caf30e5d501747dabdcb04947e28b93cb521006b24476c49c78edef043c1e6ca",
     "upgrade_state_guard_v10_1.py": "e30ba445cb7fe2a4bc7fd7d8a5da705de5b0794364123df0914a44475694cb06",
-    "verify_release.py": "591a53c101081a6ef6c44ac059dc7d393be21bb98651631015cb82f4312bb5fc"
+    "verify_release.py": "9544734b42c683b1019b008fe2cb389457c800add6690478b1a4a650003c0414"
   },
   "suite_names": [
     "test_global_v2_core_support",
@@ -35,12 +34,15 @@
     "test_php_legacy_routing",
     "test_php_legacy_matrix",
     "test_php_legacy_migrate",
-    "test_global_v2_independent",
+    "test_global_v201_full_independent",
     "test_ubuntu_global_runtime",
     "test_ubuntu_global_support",
-    "test_ubuntu_global_os_v2_regression",
+    "test_ubuntu_global_os_v201_regression",
     "test_unattended_handoff_v7",
-    "test_unattended_handoff_v7_independent_delta"
+    "test_unattended_handoff_v7_independent_delta",
+    "test_global_v201_independent",
+    "test_global_v201_installer_independent",
+    "test_pool_duplicates_independent"
   ],
-  "tests": 185
+  "tests": 211
 }

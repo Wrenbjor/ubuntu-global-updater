@@ -6,6 +6,7 @@ then apply Nginx. The caller owns health checks, old-FPM retirement and CLI.
 """
 import base64,fnmatch,glob,hashlib,json,os,re,stat
 from dataclasses import dataclass,field
+from fpm_pool_parser import parse_pools
 from pathlib import Path,PurePosixPath
 
 class RoutingError(ValueError):pass
@@ -143,17 +144,7 @@ def _read(d,path,link=False):
     snap=d.fs.capture(path,link);d.snapshots.setdefault(snap.path,snap);return snap
 
 def _pool_parse(data):
-    sections={};current=None
-    for raw in data.decode().splitlines():
-        line=raw.strip()
-        if not line or line.startswith((';','#')):continue
-        section=re.fullmatch(r'\[([A-Za-z0-9_.-]+)\]',line)
-        if section:
-            current=section.group(1);need(current not in sections,'duplicate_fpm_pool');sections[current]={};continue
-        match=re.fullmatch(r'([A-Za-z0-9_.]+(?:\[[^\]\r\n]+\])?)\s*=\s*(.+)',line)
-        need(current is not None and match is not None,'unsupported_pool_syntax')
-        key,value=match.groups();need(key not in sections[current],'duplicate_pool_directive');sections[current][key]=value
-    need(bool(sections),'empty_old_pool_file');return sections
+    return parse_pools(data, RoutingError)
 
 def _tokens(text):
     # Token positions permit exact replacement without reformatting other data.
@@ -282,7 +273,11 @@ def preflight(root,facts,legacy_ini_templates=None,target_ini_keys=None):
         snap=_read(d,path);sections=_pool_parse(snap.content);text=snap.content.decode()
         for name,values in sections.items():
             need(name not in d.pools and all(k in values for k in ('user','group','listen','pm')),'invalid_or_duplicate_fpm_pool')
-            for key,value in values.items():
+            for key,value in values.all_items():
+                if key=='listen':
+                    declared=value.strip('"\'').replace('$pool',name)
+                    need(re.fullmatch(r'/(?:var/)?run/php/[A-Za-z0-9_.-]*php'+re.escape(d.source_branch)+r'[A-Za-z0-9_.-]*\.sock',declared) is not None,
+                         'shadowed_or_effective_listen_requires_source_branch_socket')
                 need(key not in ('env[PHPRC]','env[PHP_INI_SCAN_DIR]'),'custom_php_config_environment_requires_manual_review')
                 php=re.fullmatch(r'php_(?:admin_)?(?:value|flag)\[([^\]]+)\]',key)
                 need(key in POOL_KEYS or re.fullmatch(r'env\[[A-Za-z_][A-Za-z0-9_]*\]',key) or (php and php.group(1) not in FORBIDDEN_INI),'unsupported_fpm_pool_directive')
@@ -302,7 +297,7 @@ def preflight(root,facts,legacy_ini_templates=None,target_ini_keys=None):
                 alternate=('/var'+listen) if listen.startswith('/run/') else listen[4:]
                 d.socket_map[alternate]=alternate.replace('php'+d.source_branch,'php'+d.target_branch)
         # Only the listen directive changes; pool environment and settings remain exact.
-        text=re.sub(r'(?m)^(\s*listen\s*=\s*[^\r\n]*?)php'+re.escape(d.source_branch),lambda m:m.group(1)+'php'+d.target_branch,text)
+        text=re.sub(r'(?m)^(\s*(?i:listen)\s*=\s*[^\r\n]*?)php'+re.escape(d.source_branch),lambda m:m.group(1)+'php'+d.target_branch,text)
         d.pool_contents[Path(path).name]=text.encode()
     need(bool(d.pools),'no_fpm_pools');_nginx(d)
     for root_path in d.document_roots:
@@ -332,12 +327,12 @@ def audit_existing_target_nginx(root,branch):
         snap=_read(d,path)
         for name,pool in _pool_parse(snap.content).items():
             need(name not in d.pools and all(k in pool for k in ('user','group','listen','pm')),'invalid_or_duplicate_fpm_pool')
-            for key,value in pool.items():
+            for key,value in pool.all_items():
                 need(key not in ('env[PHPRC]','env[PHP_INI_SCAN_DIR]'),'custom_php_config_environment_requires_manual_review')
                 php=re.fullmatch(r'php_(?:admin_)?(?:value|flag)\[([^\]]+)\]',key)
                 need(key in POOL_KEYS or re.fullmatch(r'env\[[A-Za-z_][A-Za-z0-9_]*\]',key) or php,'unsupported_fpm_pool_directive')
                 if php:_safe_forward(php.group(1),value)
-            need(not any(OLD_API.search(value) for value in pool.values()),'legacy_php_reference_in_active_pool')
+            need(not any(OLD_API.search(value) for _,value in pool.all_items()),'legacy_php_reference_in_active_pool')
             socket=pool['listen'].strip('"\'').replace('$pool',name)
             need(re.fullmatch(r'/(?:var/)?run/php/[A-Za-z0-9_.-]*php'+re.escape(branch)+r'[A-Za-z0-9_.-]*\.sock',socket) is not None,'nonversioned_tcp_or_custom_pool_socket')
             need(socket not in d.socket_map,'duplicate_fpm_socket');d.socket_map[socket]=socket

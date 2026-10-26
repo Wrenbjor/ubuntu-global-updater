@@ -1,6 +1,7 @@
 """Python3.6-compatible read-only pre-Noble service/vhost health; no migration."""
 import glob,hashlib,ipaddress,json,os,re,shutil,stat,subprocess
 from pathlib import Path,PurePosixPath
+from fpm_pool_parser import parse_pools
 class EarlyError(Exception):pass
 RoutingError=EarlyError
 def need(value,code):
@@ -59,17 +60,7 @@ def _read(d,path,link=False):
     snap=d.fs.capture(path,link);d.snapshots.setdefault(snap.path,snap);return snap
 
 def _pool_parse(data):
-    sections={};current=None
-    for raw in data.decode().splitlines():
-        line=raw.strip()
-        if not line or line.startswith((';','#')):continue
-        section=re.fullmatch(r'\[([A-Za-z0-9_.-]+)\]',line)
-        if section:
-            current=section.group(1);need(current not in sections,'duplicate_fpm_pool');sections[current]={};continue
-        match=re.fullmatch(r'([A-Za-z0-9_.]+(?:\[[^\]\r\n]+\])?)\s*=\s*(.+)',line)
-        need(current is not None and match is not None,'unsupported_pool_syntax')
-        key,value=match.groups();need(key not in sections[current],'duplicate_pool_directive');sections[current][key]=value
-    need(bool(sections),'empty_old_pool_file');return sections
+    return parse_pools(data, EarlyError)
 
 def _tokens(text):
     # Token positions permit exact replacement without reformatting other data.
