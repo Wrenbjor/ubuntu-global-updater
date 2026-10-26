@@ -16,14 +16,25 @@ import subprocess
 import sys
 import time
 import urllib.request
+import importlib
+import secrets
 from pathlib import Path
 
 import ubuntu_global_guard as guard
 import ubuntu_global_os as os_upgrade
-import ubuntu_global_runtime as node
-import unattended_handoff_v7 as unattended
+import ubuntu_global_handoff as unattended
 import upgrade_state_guard_v10_1 as legacy
 import ubuntu_global_support as support
+import ubuntu_global_early as early
+
+class DeferredModule:
+    """Bionic must reach Noble before importing modern runtime migration code."""
+    def __init__(self, name):
+        self.name = name
+    def __getattr__(self, name):
+        return getattr(importlib.import_module(self.name), name)
+
+node = DeferredModule('ubuntu_global_runtime')
 
 BASE = Path('/var/lib/visionline-global-updater')
 UNIT = 'visionline-global-updater.service'
@@ -46,6 +57,10 @@ def need(value, code):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+def unique_stamp():
+    # Python3.6 has no time.time_ns(); exclusive file creation still guards races.
+    return str(int(time.time() * 1000000)) + '-' + secrets.token_hex(6)
 
 def private_directory(path):
     if not path.exists() and not path.is_symlink():
@@ -87,7 +102,7 @@ def run(argv, timeout=30, check=True, capture=True):
 
 def package_command(argv, label):
     """Installer has no kill-on-timeout: it remains supervised, never blindly retried."""
-    log = BASE / ('command-' + label + '-' + str(time.time_ns()) + '.log')
+    log = BASE / ('command-' + label + '-' + unique_stamp() + '.log')
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     emit(label, 'running', private_log=log.name)
     with os.fdopen(fd, 'wb') as stream:
@@ -136,29 +151,10 @@ def service_baseline():
                   and not re.match(r'^(?:apt-daily|unattended-upgrades|user@|session-|systemd-(?:hostnamed|timedated|localed))', row.split()[0]))
 
 def health_baseline():
-    """Read the existing include graph; never publish PHP probes or read DB rows."""
-    if run(['/bin/systemctl', 'is-active', 'nginx'], check=False).strip() != 'active':
-        return dict(scope='service-state-only', specs=[], results=[])
-    import php74_to8_routing_v10 as route
-    import php74_to8_runner_v10 as php
-    fs = route.FileSystem('/')
-    discovery = route.Discovery(fs.root, fs, source_branch='7.4', target_branch='8.3')
-    for path in Path('/etc/php').glob('*/fpm/pool.d/*.conf'):
-        snap = fs.capture(str(path))
-        for pool in route._pool_parse(snap.content).values():
-            socket = pool.get('listen', '').strip('"\'')
-            if socket.startswith(('/run/', '/var/run/')):
-                discovery.socket_map[socket] = socket
-                alternate = '/var' + socket if socket.startswith('/run/') else socket[4:]
-                discovery.socket_map[alternate] = alternate
-    route._nginx(discovery)
-    specs = php.health_specs(discovery)
-    return dict(scope='discovered-local-PHP-Nginx-vhosts', specs=specs, results=php.health(specs))
+    return early.health_baseline()
 
 def check_health(before):
-    if before['specs']:
-        import php74_to8_runner_v10 as php
-        php.comparable_health(before['results'], php.health(before['specs']))
+    return early.check_health(before)
 
 def config_tests():
     if shutil.which('nginx'):
@@ -307,7 +303,7 @@ def apt_cache():
             continue
         raw = path.read_text()
         active = '\n'.join(line for line in raw.splitlines() if not line.lstrip().startswith('#'))
-        need(not re.search(r'(?i)(?:trusted\s*=\s*yes|allow-insecure\s*=\s*yes|^\s*(?:Trusted|Allow-Insecure):\s*yes)', active, re.M), 'insecure_APT_source_option')
+        need(not support.insecure_source_options(active), 'insecure_APT_source_option')
     return apt.Cache()
 
 def authenticated(candidate, codename):
@@ -331,9 +327,14 @@ def apt_plan(phase='patch', node_version=None):
         # Node is handled in its own source/major/consumer-aware stage.
         if 'nodejs' in cache:
             cache['nodejs'].mark_keep()
+        if identity()['release'] != '24.04':
+            for package in cache:
+                if guard.php_package(package.name):
+                    package.mark_keep()
     changes = []
     pins = {}
-    baseline = dict(packages=before, machine_id=identity()['machine_id'], phase=phase)
+    baseline = dict(packages=before, machine_id=identity()['machine_id'], phase=phase,
+                    defer_php=identity()['release'] != '24.04')
     if phase == 'node':
         baseline['node_target_major'] = node.node_major(node_version)
     for package in cache.get_changes():
@@ -373,7 +374,7 @@ def remove_guard(proof):
 
 def package_update(phase='patch', node_version=None):
     plan = apt_plan(phase, node_version)
-    path = BASE / ('plan-' + phase + '-' + str(time.time_ns()) + '.json')
+    path = BASE / ('plan-' + phase + '-' + unique_stamp() + '.json')
     write_json(path, plan)
     if not plan['pins']:
         return plan
@@ -396,13 +397,14 @@ def refresh():
     package_command(['/usr/bin/apt-get'] + APT_OPTIONS + ['-o', 'APT::Update::Error-Mode=any', 'update'], 'refresh')
 
 def php_stage():
-    import php74_to8_runner_v10 as php
-    import php74_to8_packages_v10 as pkg
+    need(identity()['release'] == '24.04', 'PHP_stage_requires_verified_Ubuntu_24_04')
+    import php_legacy_runner as php
+    import php_legacy_packages as pkg
     current = packages()
     branches = sorted({guard.php_branch(n) for n in current if guard.php_branch(n)})
-    need(not any(branch not in ('7.4', '8.2', '8.3', '8.4', '8.5') for branch in branches),
+    need(not any(branch not in pkg.LEGACY_BRANCHES and branch not in pkg.FLOORS for branch in branches),
          'PHP_branch_needs_separate_migration_profile')
-    if '7.4' in branches:
+    if any(branch in pkg.LEGACY_BRANCHES for branch in branches):
         job = BASE / 'php-migration'
         need(not job.exists(), 'partial_PHP_migration_requires_review_no_blind_retry')
         job.mkdir(mode=0o700)
@@ -411,7 +413,7 @@ def php_stage():
         return php.migrate(job)
     findings = []
     for branch in branches:
-        import php74_to8_routing_v10 as routing
+        import php_legacy_routing as routing
         discovery = routing.audit_existing_target_nginx('/', branch)
         specs = php.health_specs(discovery)
         before_health = php.health(specs)
@@ -478,10 +480,12 @@ def work_stage(state, name, callback):
     emit(name, 'started')
     result = callback()
     write_json(BASE / ('result-' + name + '.json'), result if result is not None else {})
-    if name == 'php' and isinstance(result, dict) and result.get('status') == 'PHP74_REPLACED_WITH_SECURE_PHP8':
+    if name == 'php' and isinstance(result, dict) and result.get('status') == 'LEGACY_PHP_REPLACED_WITH_SECURE_PHP8':
+        need(result.get('source_branch') in ('7.2', '7.3', '7.4', '8.0', '8.1'), 'verified_PHP_source_branch_missing')
         target = 'php' + result['target_branch'] + '-fpm.service'
+        source = 'php' + result['source_branch'] + '-fpm.service'
         expected = state.get('expected_services', state['services'])
-        state['expected_services'] = sorted({target if unit == 'php7.4-fpm.service' else unit for unit in expected})
+        state['expected_services'] = sorted({target if unit == source else unit for unit in expected})
     state_update(state, operation_running=False, completed=state['completed'] + [name])
     emit(name, 'complete')
     return result
@@ -504,7 +508,7 @@ def worker():
     try:
         if saved.exists():
             unattended.restore_timers(unattended.System(), unattended.load_state(saved))
-            saved.rename(BASE / ('unattended-state-' + str(time.time_ns()) + '.json'))
+            saved.rename(BASE / ('unattended-state-' + unique_stamp() + '.json'))
         unattended.prepare(unattended.System(), saved, 60, True)
         state_update(state, status='running')
         snap = snapshot()
@@ -587,6 +591,21 @@ def run_os(state, snap):
             need(prior['boot_id'] != snap['boot_id'], 'prerequisite_reboot_not_completed')
         state_update(state, status='waiting-reboot', prerequisite_reboot=dict(boot_id=snap['boot_id'], release=snap['release']))
         return 'waiting-reboot'
+    # Capture before the first refresh, including sources that may no longer
+    # publish this old PHP suite. Reuse original bytes across a prerequisite
+    # reboot; never turn our paused source text into the restore baseline.
+    capture_path = BASE / ('config-before-' + snap['release'])
+    if capture_path.exists():
+        need(state.get('os_capture') == str(capture_path), 'unowned_OS_configuration_capture')
+        private_directory(capture_path)
+        manifest = guard.read_private(capture_path / 'manifest.json')
+    else:
+        capture_path.mkdir(mode=0o700)
+        manifest = support.capture(capture_path)
+        write_json(capture_path / 'manifest.json', manifest)
+        state_update(state, os_capture=str(capture_path))
+    need(not manifest['gaps'], 'configuration_backup_coverage_gap_before_OS_commit')
+    support.pause_php_sources_for_os(manifest, capture_path)
     # Bring the source release current before invoking its next LTS upgrader.
     stage = 'prepare-Ubuntu-' + snap['release']
     if stage not in state['completed']:
@@ -599,14 +618,7 @@ def run_os(state, snap):
             state_update(state, status='waiting-reboot', prerequisite_reboot=dict(boot_id=snap['boot_id'], release=snap['release']))
             return 'waiting-reboot'
         need(decision['action'] == 'upgrade', 'OS_prerequisites_not_ready')
-    capture_path = BASE / ('config-before-' + snap['release'])
-    need(not capture_path.exists(), 'existing_OS_configuration_capture_no_blind_retry')
-    capture_path.mkdir(mode=0o700)
-    manifest = support.capture(capture_path)
-    write_json(capture_path / 'manifest.json', manifest)
-    need(not manifest['gaps'], 'configuration_backup_coverage_gap_before_OS_commit')
-    state_update(state, os_capture=str(capture_path))
-    proof = install_guard(dict(packages=packages(), machine_id=snap['machine_id'], phase='os'))
+    proof = install_guard(dict(packages=packages(), machine_id=snap['machine_id'], phase='os', defer_php=True))
     state_update(state, operation='OS-' + snap['release'], operation_running=True)
     post = {}
     def preflight(_):
@@ -636,7 +648,7 @@ def launch():
     need(os.geteuid() == 0, 'root_required')
     current = identity()
     need(digest(current['hostname'].lower().split('.', 1)[0].encode()) != '2c828ee62ed7f0f6ba7da40f2cabedb4b1744f78bdb94115daf502dae4079df5', 'host_marked_for_replacement')
-    need(current['os_id'] == 'ubuntu' and current['release'] in ('20.04', '22.04', '24.04'), 'supported_Ubuntu_20_22_24_required')
+    need(current['os_id'] == 'ubuntu' and current['release'] in ('18.04', '20.04', '22.04', '24.04'), 'supported_Ubuntu_18_20_22_24_required')
     old_workflow()
     private_directory(BASE)
     need(not (BASE / 'state.json').exists(), 'existing_job_use_status_no_blind_retry')
@@ -678,8 +690,9 @@ def main():
         run(['/bin/systemctl', '--no-pager', 'status', UNIT], check=False)
     else:
         value = snapshot()
+        node_inventory = node.collect_snapshot() if value['release'] == '24.04' else dict(status='deferred-until-Ubuntu24.04')
         print(json.dumps(dict(mode='plan', production_changes=0, inventory=value,
-                             OS=os_upgrade.plan(value), node=node.collect_snapshot()), indent=2))
+                             OS=os_upgrade.plan(value), node=node_inventory), indent=2))
 
 if __name__ == '__main__':
     try:

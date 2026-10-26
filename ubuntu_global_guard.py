@@ -22,6 +22,9 @@ def php_branch(name):
     match = re.match(r'^(?:php|libapache2-mod-php|libphp)(\d+\.\d+)(?:-|$)', name)
     return match.group(1) if match else None
 
+def php_package(name):
+    return name.startswith(('php', 'libphp', 'libapache2-mod-php'))
+
 def need(value, code):
     if not value:
         raise PolicyError(code)
@@ -66,6 +69,9 @@ def validate_actions(actions, baseline, phase='patch'):
         need(name not in seen, 'duplicate_package_action')
         seen.add(name)
         action, old, new = item['action'], item.get('old'), item.get('new')
+        if php_package(name):
+            need(not baseline.get('defer_php') or old == new and action == 'upgrade',
+                 'PHP_package_changes_deferred_until_Ubuntu_24_04')
         if approved is not None:
             need(exact.get(name) == (old, new, action), 'package_action_outside_exact_plan')
         need(action in ('install', 'upgrade', 'remove'), 'unsupported_package_action')
@@ -75,6 +81,7 @@ def validate_actions(actions, baseline, phase='patch'):
         need(old == known, 'installed_package_baseline_changed')
         if action == 'remove':
             permitted_legacy = phase == 'php' and name.startswith('php7.4-')
+            need(phase != 'os' or not php_package(name), 'PHP_removal_during_OS_upgrade_forbidden')
             need(phase != 'patch' and (permitted_legacy or not PROTECTED.match(name)), 'protected_package_removal')
             need(new is None and old is not None, 'malformed_removal')
             continue

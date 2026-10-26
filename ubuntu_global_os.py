@@ -11,7 +11,7 @@ import configparser,copy,hashlib,importlib,importlib.util,json,os,re,select,stat
 from pathlib import Path,PurePosixPath
 
 class OSHold(Exception):pass
-HOPS={'20.04':('22.04','focal','jammy'),'22.04':('24.04','jammy','noble')}
+HOPS={'18.04':('20.04','bionic','focal'),'20.04':('22.04','focal','jammy'),'22.04':('24.04','jammy','noble')}
 TARGET='24.04'
 EXCLUDED_SHA256={'2c828ee62ed7f0f6ba7da40f2cabedb4b1744f78bdb94115daf502dae4079df5'}
 ENV=dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C',DEBIAN_FRONTEND='noninteractive',UCF_FORCE_CONFFOLD='1',APT_LISTCHANGES_FRONTEND='none',NEEDRESTART_MODE='l',NEEDRESTART_SUSPEND='y',RELEASE_UPGRADER_NO_SCREEN='1')
@@ -51,7 +51,7 @@ def old_progress_allowed(value):
  if type(value) is not dict or value.get('error') not in (None,False) or value.get('failed_part') is not None:return False
  return value.get('phase') in ('part1-complete','part2-complete') and value.get('php_phase') in (None,'complete')
 def plan(snapshot,checkpoint=None):
- """Pure deterministic next action. Never accepts 18.04 or a newer downgrade."""
+ """Pure deterministic next action. Only sequential LTS hops; no downgrade."""
  release=snapshot.get('release');host=str(snapshot.get('hostname','')).lower().split('.',1)[0]
  if digest(host.encode()) in EXCLUDED_SHA256:return dict(action='excluded',reason='user_replacement_host',hostname=host)
  if release not in (*HOPS,TARGET):return dict(action='hold',reason='unsupported_Ubuntu_release',release=release)

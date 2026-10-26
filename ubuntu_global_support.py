@@ -4,8 +4,6 @@ No network, package operations, service changes or general /etc restore. Manifes
 and backups contain sensitive configuration; callers should emit only proof flags
 and gap identifiers, never serialize their contents to a shared console.
 """
-from __future__ import annotations
-
 import hashlib
 import json
 import os
@@ -276,8 +274,14 @@ def _vendor(url):
     return None
 
 
+def insecure_source_options(content):
+    active = '\n'.join(line for line in content.splitlines() if not line.lstrip().startswith('#'))
+    return bool(re.search(r'(?:\b(?:trusted|allow-insecure|allow-weak|allow-downgrade-to-insecure)\s*=\s*(?:yes|true|1)\b|^\s*(?:Trusted|Allow-Insecure|Allow-Weak|Allow-Downgrade-To-Insecure):\s*(?:yes|true|1)\b)', active, re.I | re.M))
+
 def vendor_source_content(content, suffix, old_codename, target_codename):
     """Return restorable known-vendor-only content and explicit coverage gaps."""
+    if insecure_source_options(content):
+        return None, ['insecure_source_options']
     if not re.fullmatch(r"[a-z]+", target_codename or "") or not re.fullmatch(r"[a-z]+", old_codename or ""):
         return None, ["source_codename_unavailable"]
     selected, gaps = [], []
@@ -438,3 +442,124 @@ def restore_verify(manifest, job, targetcodename, *, root="/"):
     return {"configuration_preserved": not config_gaps, "vendor_sources_restored": not gaps,
             "restored_source_files": restored_sources, "coverage_gaps": sorted(set(gaps)),
             "requires_apt_refresh_and_candidate_authentication": bool(restored_sources)}
+
+
+def pause_php_sources_for_os(manifest, job, *, root='/'):
+    """Disable only captured, known external PHP sources during OS preparation.
+
+    Old PPA suites can have disappeared. Ubuntu repositories remain untouched;
+    immutable original source bytes are used by restore_verify after each hop.
+    This performs no network or package action and is Python3.6 compatible.
+    """
+    root, job = Path(root).absolute(), _job(job).absolute()
+    store = Path(manifest['store'])
+    if store != job / 'configuration-preservation':
+        raise ValueError('Source capture belongs to another job')
+    if manifest['gaps']:
+        raise ValueError('Source capture has unresolved coverage gaps')
+    originals = {item['path']: item for item in manifest['sources']}
+    def verify_sources(paused):
+        files = set()
+        if _at(root, '/etc/apt/sources.list').exists() or _at(root, '/etc/apt/sources.list').is_symlink():
+            files.add('/etc/apt/sources.list')
+        directory = _at(root, '/etc/apt/sources.list.d')
+        if directory.exists():
+            files.update('/etc/apt/sources.list.d/' + p.name for p in directory.iterdir() if p.suffix in ('.list', '.sources'))
+        if files != set(originals):
+            raise ValueError('APT source file set changed since capture')
+        for name, item in originals.items():
+            if item['kind'] != 'file':
+                raise ValueError('Captured APT source is not a regular file')
+            path = _at(root, name);_safe_parents(path, root);info = path.lstat()
+            expected = paused.get(name, item['sha256'])
+            if (item['kind'] != 'file' or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != item['uid'] or info.st_gid != item['gid']
+                    or stat.S_IMODE(info.st_mode) != item['mode'] or _digest(path.read_bytes()) != expected):
+                raise ValueError('Captured APT source changed')
+    receipt = job / 'paused-php-sources.json'
+    if receipt.exists():
+        saved = json.loads(receipt.read_text())
+        paused = {}
+        for item in saved['files']:
+            if item['path'] not in originals or item['before_sha256'] != originals[item['path']]['sha256']:
+                raise ValueError('Paused PHP source receipt baseline changed')
+            paused[item['path']] = item['after_sha256']
+            path = _at(root, item['path'])
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != item['uid']
+                    or info.st_gid != item['gid'] or stat.S_IMODE(info.st_mode) != item['mode']
+                    or _digest(path.read_bytes()) != item['after_sha256']):
+                raise ValueError('Previously paused PHP source changed')
+        verify_sources(paused)
+        return saved
+    verify_sources({})
+
+    def is_php(url):
+        return _vendor(url) in ('ondrej', 'setup_php') and urlsplit(url).path.rstrip('/') in (
+            '/ondrej/php/ubuntu', '/shivammathur/php/ubuntu', '/shivammathur/php-ubuntu/ubuntu')
+
+    plans = []
+    for item in manifest['sources']:
+        if item['kind'] != 'file':
+            raise ValueError('Source snapshot is not a regular file')
+        original = (store / 'objects' / item['sha256']).read_bytes()
+        if _digest(original) != item['sha256']:
+            raise ValueError('Source backup checksum changed')
+        content = original.decode()
+        if insecure_source_options(content):
+            raise ValueError('Insecure source options in capture')
+        pieces = []
+        if Path(item['path']).suffix == '.list':
+            for line in content.splitlines(keepends=True):
+                match = re.fullmatch(r'(deb(?:-src)?\s+(?:\[[^\]]+\]\s+)?)(\S+)\s+(\S+)(\s+.+)', line.strip())
+                if match and is_php(match.group(2)):
+                    if match.group(3) != manifest['source_codename'] or re.search(r'trusted\s*=\s*yes|allow-insecure\s*=\s*yes', line, re.I):
+                        raise ValueError('Unsafe or foreign PHP source before OS upgrade')
+                    pieces.append('# PHP deferred until Ubuntu24.04: ' + line)
+                else:
+                    pieces.append(line)
+        else:
+            for block in re.split(r'(\n\s*\n)', content):
+                fields = dict(re.findall(r'^([A-Za-z-]+):\s*(.*)$', block, re.M))
+                urls = fields.get('URIs', '').split()
+                if any(is_php(url) for url in urls) and fields.get('Enabled', 'yes').lower() != 'no':
+                    if len(urls) != 1 or fields.get('Suites') != manifest['source_codename']:
+                        raise ValueError('Mixed or foreign PHP source stanza')
+                    if any(fields.get(key, 'no').lower() == 'yes' for key in ('Trusted', 'Allow-Insecure')):
+                        raise ValueError('Insecure PHP source stanza')
+                    block = re.sub(r'^Enabled:.*$', 'Enabled: no', block, flags=re.M) if 'Enabled' in fields else block.rstrip('\n') + '\nEnabled: no'
+                pieces.append(block)
+        replacement = ''.join(pieces).encode()
+        if replacement == original:
+            continue
+        path = _at(root, item['path'])
+        _safe_parents(path, root)
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != item['uid']
+                or info.st_gid != item['gid'] or stat.S_IMODE(info.st_mode) != item['mode']
+                or _digest(path.read_bytes()) != item['sha256']):
+            raise ValueError('PHP source changed since immutable capture')
+        sha = _digest(replacement)
+        obj = store / 'objects' / sha
+        if not obj.exists():
+            fd = os.open(str(obj), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(replacement); stream.flush(); os.fsync(stream.fileno())
+        plans.append((dict(item, sha256=sha), dict(path=item['path'], uid=item['uid'], gid=item['gid'], mode=item['mode'],
+                                                 before_sha256=item['sha256'], after_sha256=sha)))
+    # Validate all source plans before modifying the first source file.
+    verify_sources({})
+    for changed, _ in plans:
+        _restore_item(changed, root, store)
+    result = dict(status='known-PHP-sources-paused', files=[record for _, record in plans],
+                  Ubuntu_repositories_changed=False, PHP_packages_changed=False)
+    verify_sources({item['path']: item['after_sha256'] for item in result['files']})
+    fd = os.open(str(receipt), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        json.dump(result, stream, sort_keys=True); stream.flush(); os.fsync(stream.fileno())
+    directory = os.open(str(job), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return result
