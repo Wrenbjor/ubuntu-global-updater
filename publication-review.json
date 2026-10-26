@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "review_date": "2026-10-26",
+  "review_type": "independent local publication payload review",
+  "status": "no_known_blocking_publication_finding",
+  "intended_repository": "https://github.com/wrenbjor/ubuntu-global-updater",
+  "reviewed_artifact_sha256": {
+    "install.sh": "7ecd5c762afbc5b4b303c33a77ae249499a7edf30ac6e2af4b562a9b8811c0e9",
+    "decoded_payload_json": "5920fd5dc62d164f0f6c18ef262f65da31b832284d4461e4fa5a40e5ea017a88",
+    "release.json": "8874ed497e41b3d4a77271e3d84cd6203eec1f53e34f1b3a953e261351722cec",
+    "README.md": "814e038f1709cf0603706277cf1d5fa8c7f21f8153b126dd03e456a2e6f468df",
+    "verify_release.py": "766510746301ba2ac20459993057ccc6169020b35e08c8ba8a6d97c84b8043b9"
+  },
+  "independent_tests": {
+    "run": 7,
+    "failures": 0,
+    "errors": 0,
+    "scope": [
+      "Explicit public-file allowlist and absence of private evidence directories",
+      "Decoded embedded payload checksum, ten-module allowlist and exact public-source equality",
+      "Eight modules unchanged; only the two intended host-exclusion representations changed",
+      "Known private-identifier and credential-literal pattern checks on visible and decoded content",
+      "Release manifest checksums, Python compilation through offline verifier and Bash syntax",
+      "Installer explicitly selects apply while installed wrapper passes through arguments",
+      "Normalized exclusion behavior retained by SHA256 comparison"
+    ]
+  },
+  "manual_checks": [
+    "Reviewed README, manifest, offline verifier and the two source diffs",
+    "Reviewed literal network endpoints as vendor documentation, vendor repositories or standard local metadata endpoints",
+    "Reviewed decoded installer content rather than treating encoded bytes as sanitized",
+    "No fleet inventories, collected host identifiers, credentials, command logs, private configuration captures or backup archives included",
+    "Existing operational namespaces retained to preserve compatibility with prior state and locks"
+  ],
+  "production_connections": 0,
+  "installer_executed": false,
+  "publication_performed_by_reviewer": false,
+  "live_OS_upgrade_tested": false,
+  "live_application_migration_tested": false,
+  "limits": [
+    "This review concerns the selected static public payload, not any future repository commits or runtime-generated evidence",
+    "Pattern checks and source review cannot prove the absence of every possible secret",
+    "A hashed exclusion removes the literal identifier but is not encryption or a guarantee against guessing",
+    "The original integrated bundle recorded 206 local fixture and mocked tests; these do not establish production application compatibility or tested recovery",
+    "No universal production readiness, complete vulnerability closure or live migration success claim is made",
+    "Use an independently reviewed full commit revision and installer digest for execution"
+  ]
+}
