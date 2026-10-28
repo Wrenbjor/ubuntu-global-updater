@@ -1,4 +1,4 @@
-# Ubuntu global updater v2.0.1
+# Ubuntu global updater v2.0.2
 
 One installer for a selected DigitalOcean Ubuntu host: **finish the OS upgrade to
 24.04 first, then migrate legacy PHP to a patched supported PHP8 branch.**
@@ -16,7 +16,7 @@ are needed on the server. Readable source is included for review.
 
 Every LTS hop has its own checkpoint, reboot and target-release/kernel verification.
 Ubuntu16.04 and unknown/newer releases hold; the updater never downgrades an OS.
-Existing replacement-host exclusions remain in force.
+There are no hostname-based replacement exclusions. Every host follows the same supported-release, package, recovery and compatibility checks.
 
 PHP7.2/7.3/7.4/8.0/8.1 are migration **sources**, not patched destination branches.
 The preferred new branch is8.3, with the reviewed supported8.x candidate/compatibility
@@ -25,6 +25,13 @@ supported branch is preserved when retiring a dormant legacy branch. Detection d
 not assume image labels, default `php -v`, or installed package presence prove the
 running web version. Pools, extensions, source API/ABI, CLI, actual Nginx sockets,
 workers and local application health are checked.
+
+## Host eligibility
+
+The prior operator-requested replacement exclusion has been removed. Ubuntu18.04
+hosts now follow the normal18.04→20.04→22.04→24.04 path regardless of hostname.
+This does not bypass existing failed jobs, database-major migration holds or other
+compatibility checks. Recognized v2.0.1 preflight-only payloads can be refreshed.
 
 ## Duplicate-pool preflight fix and retry
 

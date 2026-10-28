@@ -13,7 +13,6 @@ from pathlib import Path,PurePosixPath
 class OSHold(Exception):pass
 HOPS={'18.04':('20.04','bionic','focal'),'20.04':('22.04','focal','jammy'),'22.04':('24.04','jammy','noble')}
 TARGET='24.04'
-EXCLUDED_SHA256={'2c828ee62ed7f0f6ba7da40f2cabedb4b1744f78bdb94115daf502dae4079df5'}
 ENV=dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C',DEBIAN_FRONTEND='noninteractive',UCF_FORCE_CONFFOLD='1',APT_LISTCHANGES_FRONTEND='none',NEEDRESTART_MODE='l',NEEDRESTART_SUSPEND='y',RELEASE_UPGRADER_NO_SCREEN='1')
 REQUIRED_CHECKS=('identity','configuration_backup','package_guard','boot_targets','disk_space','services','no_active_installer')
 POST_CHECKS=('identity','configuration_preserved','services','boot_targets','vendor_sources_restored')
@@ -52,8 +51,7 @@ def old_progress_allowed(value):
  return value.get('phase') in ('part1-complete','part2-complete') and value.get('php_phase') in (None,'complete')
 def plan(snapshot,checkpoint=None):
  """Pure deterministic next action. Only sequential LTS hops; no downgrade."""
- release=snapshot.get('release');host=str(snapshot.get('hostname','')).lower().split('.',1)[0]
- if digest(host.encode()) in EXCLUDED_SHA256:return dict(action='excluded',reason='user_replacement_host',hostname=host)
+ release=snapshot.get('release')
  if release not in (*HOPS,TARGET):return dict(action='hold',reason='unsupported_Ubuntu_release',release=release)
  if snapshot.get('ubuntu') is not True:return dict(action='hold',reason='Ubuntu_identity_required')
  if not old_progress_allowed(snapshot.get('old_progress')):return dict(action='hold',reason='prior_failed_or_partial_workflow_preserved')

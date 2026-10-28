@@ -651,7 +651,6 @@ def run_os(state, snap):
 def launch_locked():
     need(os.geteuid() == 0, 'root_required')
     current = identity()
-    need(digest(current['hostname'].lower().split('.', 1)[0].encode()) != '2c828ee62ed7f0f6ba7da40f2cabedb4b1744f78bdb94115daf502dae4079df5', 'host_marked_for_replacement')
     need(current['os_id'] == 'ubuntu' and current['release'] in ('18.04', '20.04', '22.04', '24.04'), 'supported_Ubuntu_18_20_22_24_required')
     old_workflow()
     private_directory(BASE)
