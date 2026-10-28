@@ -8,16 +8,17 @@
   "schema": 2,
   "skipped": 0,
   "source_sha256": {
-    "README.md": "c0a74cb25d378054f4fdb4eb8cc86f638ac27723483a9cbc8c7984be53df6174",
+    "README.md": "66b337c73bd05851af88daa7fb18d823e56abc7f3d9651a448a371b21c5e083e",
     "fpm_pool_parser.py": "f2bcd43183791c1f1cb2b4affc17a232ee2184494b16fb9a441f824f36bca00a",
+    "health_policy.py": "9b10d5485721305f27b25cb395a99cd03ff036dcc80860acca33b5696832c76b",
     "host_identity.py": "5186a627fd27971c29991b47a2a5739b53a0310934a43e08d01b85a208cb342d",
-    "install.sh": "67e4476ddd6af19f9b8a8817b198d4d5ad74860021174bdbbfc6eef69986af2d",
+    "install.sh": "1233df1de5bce7af4554df3f3a0766a43bcdd6b7d1a3a736bb225b078212efc2",
     "php_legacy_packages.py": "5a081fc018b709b98717d9226d91c2f7971d58ea0ad5480ebb1dd8fdb47abadb",
     "php_legacy_routing.py": "a92b5cf952f77def23e32adfbac5aea540635b2eddd2872ebbdce4dec8e93e79",
-    "php_legacy_runner.py": "004968bde0604bc547725128fb913e6a47bd706a4401e41a916ec59453c9e12d",
-    "prelaunch_installer.py": "a80c41dfca4d26bf73ba8af0ca76623bbae145b7497e7da4efc9b0d651c89c63",
-    "ubuntu_global.py": "a83b80767a7d01a182423f8a597e35dc0a9cb7f22a2dea39ff333364e9ecfabe",
-    "ubuntu_global_early.py": "ac8f31953152ff83c60043fd553833db0280a2c8a7214d16195653d60ab4cdce",
+    "php_legacy_runner.py": "aec8e2599a45307b32422565a026c42e7f9d04da825d0c3727ba0bbe2c17946e",
+    "prelaunch_installer.py": "efe479d27621c53a19c306ac6f6929fbf277a342c7aa32cd413a606c935a88dd",
+    "ubuntu_global.py": "0f5aa5ebbf652626f3c94166e11e626ba1400fab9fc4099b3656f59ef8d508df",
+    "ubuntu_global_early.py": "67872bb704097189b413a853a942e9cb98599127b692e1c65d2378349c26b3ca",
     "ubuntu_global_guard.py": "6e03904bc5c31f622214828c623200036117a7e425a4083f7dbdd895abffc9bc",
     "ubuntu_global_handoff.py": "dc0886dfe15bce3d36e7d2fb193ec763754ebb630f0f59b1047e25266ddf2bae",
     "ubuntu_global_os.py": "9e9dfd0edfdd0beff94acbb8f2b0c445f693fed0c9d0dc76b6b8a3c8923d53bb",
@@ -26,7 +27,7 @@
     "unattended_handoff_v7.py": "caf30e5d501747dabdcb04947e28b93cb521006b24476c49c78edef043c1e6ca",
     "updater_layout.py": "fb5721081367b76113ea1f4db3460b2961f83c3e932578ad1ac51f0e77417f88",
     "upgrade_state_guard_v10_1.py": "e30ba445cb7fe2a4bc7fd7d8a5da705de5b0794364123df0914a44475694cb06",
-    "verify_release.py": "10099480f02a09ae606fb92bdedb6710095c326fc5c697269a79513ecdc144f9"
+    "verify_release.py": "de825e952c7541524e62260a380fe3262c7d3476b00e633cc0fe644c8ea7d958"
   },
   "suite_names": [
     "test_global_v2_core_support",
@@ -36,17 +37,19 @@
     "test_php_legacy_routing",
     "test_php_legacy_matrix",
     "test_php_legacy_migrate",
-    "test_global_v210_full_independent",
+    "test_global_v211_full_independent",
     "test_ubuntu_global_runtime",
     "test_ubuntu_global_support",
-    "test_ubuntu_global_os_v210_regression",
+    "test_ubuntu_global_os_v211_regression",
     "test_unattended_handoff_v7",
     "test_unattended_handoff_v7_independent_delta",
-    "test_global_v210_independent",
-    "test_global_v210_installer_independent",
+    "test_global_v211_independent",
+    "test_global_v211_installer_independent",
     "test_pool_duplicates_independent",
-    "test_generic_updater",
-    "test_updater_layout_private"
+    "test_generic_updater_v211",
+    "test_updater_layout_private",
+    "test_health_exclusions",
+    "test_health_policy_review_v211"
   ],
-  "tests": 232
+  "tests": 255
 }

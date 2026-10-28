@@ -27,6 +27,7 @@ import ubuntu_global_support as support
 import ubuntu_global_early as early
 import updater_layout as layout
 import host_identity as host_id
+import health_policy
 
 class DeferredModule:
     """Bionic must reach Noble before importing modern runtime migration code."""
@@ -59,7 +60,7 @@ def need(value, code):
 
 def error_code(error):
     known = (UpdateError, guard.PolicyError, unattended.HandoffError, os_upgrade.OSHold, early.EarlyError,
-             layout.LayoutError, host_id.IdentityError)
+             layout.LayoutError, host_id.IdentityError, health_policy.HealthPolicyError)
     return str(error) if isinstance(error, known) else type(error).__name__
 
 def digest(data):
@@ -490,6 +491,7 @@ def state_update(state, **values):
 
 def work_stage(state, name, callback):
     check_layout(); check_job_identity(state)
+    early.check_health_policy(state.get('health',{}))
     state_update(state, operation=name, operation_running=True)
     emit(name, 'started')
     result = callback()
@@ -519,6 +521,7 @@ def worker():
         shared_locks.append(php_lock)
     state = guard.read_private(BASE / 'state.json')
     check_job_identity(state)
+    health_policy.bind_job(state.get('health',{}).get('health_policy'))
     need(state.get('status') in ('queued', 'waiting-reboot'), 'no_automatic_retry_after_failure')
     need(not state.get('operation_running'), 'interrupted_package_operation_requires_review')
     old_workflow()

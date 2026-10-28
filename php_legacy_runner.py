@@ -3,6 +3,7 @@ import hashlib,ipaddress,json,os,re,signal,stat,subprocess,time
 from pathlib import Path
 import php_legacy_packages as pkg
 import php_legacy_routing as route
+import health_policy
 class MigrationError(Exception):pass
 ENV=dict(PATH="/usr/sbin:/usr/bin:/sbin:/bin",LANG="C",LC_ALL="C",HOME="/nonexistent",DEBIAN_FRONTEND="noninteractive",NEEDRESTART_MODE="l",UCF_FORCE_CONFFOLD="1")
 
@@ -104,9 +105,10 @@ def health_specs(discovery):
                 specs.append(dict(host=name,ip=chosen[1],port=chosen[2],tls=chosen[0],path=path))
     unique={tuple(sorted(s.items())):s for s in specs}
     need(0<len(unique)<=80,'health_probe_set_missing_or_too_large')
-    return list(unique.values())
+    return health_policy.filter_specs(list(unique.values()),getattr(discovery,'root','/'),getattr(getattr(discovery,'fs',None),'owner_uid',0))
 
 def health(specs):
+    health_policy.verify_specs(specs)
     results=[]
     for spec in specs:
         scheme='https' if spec['tls'] else 'http';host=spec['host'];port=spec['port']

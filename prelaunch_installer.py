@@ -153,7 +153,7 @@ def install_bundle(files,allowed_payloads,base=None,
             os.rename(str(staged),str(payload));sync_directory(base)
         if not exists(wrapper):write_new(wrapper,wrapper_bytes,0o700);sync_directory(wrapper.parent)
         no_job(base,unit_paths,system_reader,wrapper,uid)
-        result=dict(status='prelaunch-payload-ready',version='2.1.0',previous_payload_archived=archive.name if archive else None,
+        result=dict(status='prelaunch-payload-ready',version='2.1.1',previous_payload_archived=archive.name if archive else None,
                     source_sha256=new_hashes,application_configuration_changes=0,job_state_changes=0)
         record_fd,record=tempfile.mkstemp(prefix='installation-',suffix='.json',dir=str(base))
         with os.fdopen(record_fd,'wb') as stream:

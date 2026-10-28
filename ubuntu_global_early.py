@@ -2,6 +2,7 @@
 import glob,hashlib,ipaddress,json,os,re,shutil,stat,subprocess
 from pathlib import Path,PurePosixPath
 from fpm_pool_parser import parse_pools
+import health_policy
 class EarlyError(Exception):pass
 RoutingError=EarlyError
 def need(value,code):
@@ -157,9 +158,10 @@ def health_specs(discovery):
                 specs.append(dict(host=name,ip=chosen[1],port=chosen[2],tls=chosen[0],path=path))
     unique={tuple(sorted(s.items())):s for s in specs}
     need(0<len(unique)<=80,'health_probe_set_missing_or_too_large')
-    return list(unique.values())
+    return health_policy.filter_specs(list(unique.values()),getattr(discovery,'root','/'),getattr(getattr(discovery,'fs',None),'owner_uid',0))
 
 def health(specs):
+    health_policy.verify_specs(specs)
     results=[]
     for spec in specs:
         scheme='https' if spec['tls'] else 'http';host=spec['host'];port=spec['port']
@@ -177,7 +179,10 @@ def comparable_health(before,after):
 
 def health_baseline(root='/',owner_uid=0):
  code,status=run(['/bin/systemctl','is-active','nginx'],allow=True)
- if code or status.decode().strip()!='active':return dict(scope='service-state-only',specs=[],results=[])
+ if code or status.decode().strip()!='active':
+  policy=health_policy.receipt(root,owner_uid)
+  need(not policy['excluded_hosts'],'health_exclusions_without_HTTP_baseline')
+  return dict(scope='service-state-only',specs=[],results=[],health_policy=policy)
  fs=FileSystem(root,owner_uid);d=Discovery(fs.root,fs)
  for path in fs.physical('/etc/php').glob('*/fpm/pool.d/*.conf'):
   logical='/'+str(path.relative_to(fs.root));snap=fs.capture(logical)
@@ -187,7 +192,10 @@ def health_baseline(root='/',owner_uid=0):
     d.socket_map[socket]=socket
     alternate='/var'+socket if socket.startswith('/run/') else socket[4:];d.socket_map[alternate]=alternate
  _nginx(d);specs=health_specs(d)
- return dict(scope='discovered-local-PHP-Nginx-vhosts',specs=specs,results=health(specs))
+ return dict(scope='discovered-local-PHP-Nginx-vhosts',specs=specs,health_policy=specs.policy,results=health(specs))
+def check_health_policy(before):
+ if 'health_policy' in before:health_policy.verify(before['health_policy'])
 def check_health(before):
+ check_health_policy(before)
  if before['specs']:comparable_health(before['results'],health(before['specs']))
  return True

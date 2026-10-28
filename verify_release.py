@@ -16,7 +16,7 @@ for item in tree.body:
 raw=gzip.decompress(base64.b64decode(values['BLOB']))
 assert hashlib.sha256(raw).hexdigest()==values['EXPECTED']
 files=json.loads(raw);assert set(files)==set(values['NAMES'])
-assert len(files)==15
+assert len(files)==16
 for name,data in files.items():assert base64.b64decode(data)==(root/name).read_bytes(),name
 subprocess.run(['/bin/bash','-n',str(root/'install.sh')],check=True)
 assert "str(wrapper),'--apply'" in script

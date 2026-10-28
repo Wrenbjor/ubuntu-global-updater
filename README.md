@@ -1,4 +1,4 @@
-# Ubuntu global updater v2.1.0
+# Ubuntu global updater v2.1.1
 
 One host-local installer for supported Ubuntu systems across companies and hosting providers: **finish the OS upgrade to
 24.04 first, then migrate legacy PHP to a patched supported PHP8 branch.**
@@ -48,6 +48,24 @@ architecture, bootloader, repository, database and application-layout checks sti
 apply. Unknown providers' repositories require an explicit reviewed source profile;
 they are not enabled or rewritten speculatively. Current supported architecture is
 amd64; Apache/custom/container/application profiles retain their existing limits.
+
+## Explicit local health exclusions
+
+An operator may record obsolete preview hostnames in the root-owned mode0600 file
+`/etc/ubuntu-global-updater/health-exclusions.json`. Schema1 contains exactly
+`schema`, `host_binding` (from `host_identity.capture()` on that host), and
+`excluded_hosts` (a nonempty list of unique exact lowercase DNS names). No wildcard,
+URL/path expression, inherited global default or client hostname is built in.
+
+The file is safely read and bound to this machine. Exclusions must match discovered
+PHP hostnames and cannot remove every probe. They affect only HTTP health probes;
+Nginx configuration/routing audits, certificates and services are not modified.
+All remaining probes retain certificate/hostname verification and HTTP2xx/3xx
+requirements. Early/global and PHP migration/retirement health paths share this
+policy. Baselines record its hash (including absence); the worker binds that
+receipt across stages and reboots. Changing policy during a job stops its next
+verification instead of adopting broader exclusions. Existing jobs are never
+reset to introduce an exclusion; configure it before starting a new job.
 
 ## Host eligibility
 
@@ -163,7 +181,7 @@ This checks hashes, embedded module equality and Bash syntax without running the
 updater. On older Python it compiles only the early modules; modern modules are
 checked by the full validation under a modern interpreter. Legacy v10 source files
 may remain in repository history/root for reference; the active installer uses
-only the fifteen runtime modules listed in `release.json` and its embedded manifest.
+only the sixteen runtime modules listed in `release.json` and its embedded manifest.
 
 Security floor evidence remains the reviewed October25,2026 PHP fixes for
 CVE-2026-109618/109619 plus the Ubuntu backport exception. The separate October23

@@ -1,22 +1,23 @@
 {
   "schema": 2,
-  "version": "2.1.0",
+  "version": "2.1.1",
   "review_date": "2026-10-28",
-  "review_type": "Independent local provider-neutral identity, namespace compatibility and public artifact review",
+  "review_type": "Independent local host-bound health exclusion policy and public-package review",
   "status": "no_known_unresolved_blocker_within_documented_candidate_scope",
-  "release_json_sha256": "870b6c3af1d91161dfc5e67ce93def5063930a446b1684aaf50916dbc00e56aa",
-  "validation_json_sha256": "dcc37c18c8b0fe6dd6264e23d8f24201aa3806e8b56de81b98ce857040d4b85a",
+  "release_json_sha256": "4bf74fc8520f1c2b38887eec513dbe7ace2451f6b66c57043fe815f3a0b1d8de",
+  "validation_json_sha256": "1beb952ffe8c04ab2f3fda6595620375591e4f51c58196dadb9946d48d47ffe0",
   "source_sha256": {
-    "README.md": "c0a74cb25d378054f4fdb4eb8cc86f638ac27723483a9cbc8c7984be53df6174",
+    "README.md": "66b337c73bd05851af88daa7fb18d823e56abc7f3d9651a448a371b21c5e083e",
     "fpm_pool_parser.py": "f2bcd43183791c1f1cb2b4affc17a232ee2184494b16fb9a441f824f36bca00a",
+    "health_policy.py": "9b10d5485721305f27b25cb395a99cd03ff036dcc80860acca33b5696832c76b",
     "host_identity.py": "5186a627fd27971c29991b47a2a5739b53a0310934a43e08d01b85a208cb342d",
-    "install.sh": "67e4476ddd6af19f9b8a8817b198d4d5ad74860021174bdbbfc6eef69986af2d",
+    "install.sh": "1233df1de5bce7af4554df3f3a0766a43bcdd6b7d1a3a736bb225b078212efc2",
     "php_legacy_packages.py": "5a081fc018b709b98717d9226d91c2f7971d58ea0ad5480ebb1dd8fdb47abadb",
     "php_legacy_routing.py": "a92b5cf952f77def23e32adfbac5aea540635b2eddd2872ebbdce4dec8e93e79",
-    "php_legacy_runner.py": "004968bde0604bc547725128fb913e6a47bd706a4401e41a916ec59453c9e12d",
-    "prelaunch_installer.py": "a80c41dfca4d26bf73ba8af0ca76623bbae145b7497e7da4efc9b0d651c89c63",
-    "ubuntu_global.py": "a83b80767a7d01a182423f8a597e35dc0a9cb7f22a2dea39ff333364e9ecfabe",
-    "ubuntu_global_early.py": "ac8f31953152ff83c60043fd553833db0280a2c8a7214d16195653d60ab4cdce",
+    "php_legacy_runner.py": "aec8e2599a45307b32422565a026c42e7f9d04da825d0c3727ba0bbe2c17946e",
+    "prelaunch_installer.py": "efe479d27621c53a19c306ac6f6929fbf277a342c7aa32cd413a606c935a88dd",
+    "ubuntu_global.py": "0f5aa5ebbf652626f3c94166e11e626ba1400fab9fc4099b3656f59ef8d508df",
+    "ubuntu_global_early.py": "67872bb704097189b413a853a942e9cb98599127b692e1c65d2378349c26b3ca",
     "ubuntu_global_guard.py": "6e03904bc5c31f622214828c623200036117a7e425a4083f7dbdd895abffc9bc",
     "ubuntu_global_handoff.py": "dc0886dfe15bce3d36e7d2fb193ec763754ebb630f0f59b1047e25266ddf2bae",
     "ubuntu_global_os.py": "9e9dfd0edfdd0beff94acbb8f2b0c445f693fed0c9d0dc76b6b8a3c8923d53bb",
@@ -25,41 +26,42 @@
     "unattended_handoff_v7.py": "caf30e5d501747dabdcb04947e28b93cb521006b24476c49c78edef043c1e6ca",
     "updater_layout.py": "fb5721081367b76113ea1f4db3460b2961f83c3e932578ad1ac51f0e77417f88",
     "upgrade_state_guard_v10_1.py": "e30ba445cb7fe2a4bc7fd7d8a5da705de5b0794364123df0914a44475694cb06",
-    "verify_release.py": "10099480f02a09ae606fb92bdedb6710095c326fc5c697269a79513ecdc144f9"
+    "verify_release.py": "de825e952c7541524e62260a380fe3262c7d3476b00e633cc0fe644c8ea7d958"
   },
   "independent_tests": {
-    "run": 10,
-    "failures": 0,
-    "errors": 0,
-    "test_source_sha256": "655ab3fa8a16556e5b7857eca82f855fe5ab4c3c218cd1ee3c70fb4ca73e7587",
-    "checks": [
-      "Fresh generic installation creates no legacy persistent namespace and uses the generic wrapper",
-      "An exact recognized legacy prelaunch payload refreshes within the same legacy namespace, archives old code and creates no generic base",
-      "Mixed or dangling opposite namespaces refuse before payload writes; namespace changes during staging prevent commit",
-      "Machine-id validation, absent firmware UUID, firmware placeholders and recorded machine/firmware drift behave explicitly",
-      "Schema1 jobs are refused before identity adoption; existing job schema is never silently upgraded",
-      "A dangling job checkpoint is preserved by direct apply admission",
-      "An opposite systemd unit still loaded without unit files blocks both installer and core"
-    ]
-  },
-  "combined_validation_observed": {
-    "tests": 232,
+    "run": 8,
     "failures": 0,
     "errors": 0,
     "skipped": 0,
-    "scope": "Parent-run combined regression result read from the hash-bound validation manifest; independent checks listed separately"
+    "scope": "Root-owned private temporary fixtures; no network probes or package/service actions",
+    "test_source_sha256": "6ace56599bb221c6815225a66ba4b0287124e5392d3d121a15424c6d03af18c0",
+    "checks": [
+      "Only exactly matching canonical host probes are removed; all remaining host/IP/port/path/TLS fields remain unchanged",
+      "Unknown, duplicate, wildcard, uppercase, invalid DNS-label and all-probes exclusion requests are rejected",
+      "Unsafe file modes, links, size, ownership/binding, duplicate JSON keys and parent paths are rejected",
+      "Original policy absence is bound and a later policy file cannot expand job coverage",
+      "Early and PHP-migration health paths share the bound receipt and reject policy drift before curl",
+      "A nonempty exclusion policy requires a discoverable HTTP baseline"
+    ]
+  },
+  "combined_validation_observed": {
+    "tests": 255,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "scope": "Parent-run full regression result read from hash-bound validation manifest; eight independent checks executed separately"
   },
   "actual_Python36_evidence": {
     "interpreter": "Canonical-authenticated CPython3.6.9 privately extracted without package installation",
     "fixture_manifest_sha256": "7531687ba14558b759f750462e011d0973d1848341ec72b5ffc3a271de3c55d4",
-    "core_layout_identity_smoke_sha256": "cd77587bb7cc9de3c0ed6442394c1d505421373912310acd5dff39d389f626b9",
-    "delivered_offline_verifier_sha256": "326c81bf0f13abc0079a654feece60b386234810d9d78ae9d05960f968bd7053",
-    "inline_bootstrap_smoke_sha256": "6c6fccd51eab313cebf4638908f361a0e8649725ef26442a69c078faadad379e",
+    "core_and_policy_smoke_sha256": "060c4c4cf0c35db3db935592a9491e0780b590ebcebf13156bf466d7c42e5d1f",
+    "delivered_verifier_sha256": "ce1ff2c9a3fd2379a40a2a5783710daedca054c90e6e520d453d33b8888b531c",
+    "inline_bootstrap_smoke_sha256": "6268f31aadfa7b28a591b11de7b487d467a4b611fbf20eac61a37004732faed0",
     "checks": [
-      "Eleven bootstrap/helper modules compile and import, including generic layout and local identity",
-      "Mocked Bionic-to-Focal planning, pre-Noble PHP rejection and package logging remain compatible",
-      "Local identity capture and drift rejection run without metadata access",
-      "The exact inline bootstrap and helper definitions execute after excluding the final production install/apply call; start=False installation uses only temporary fixture paths",
+      "Twelve bootstrap/helper modules compile/import, including the health policy",
+      "A host-bound temporary policy filters one exact host and rejects later receipt drift",
+      "Bionic planning, pre-Noble PHP rejection and mocked package logging remain compatible",
+      "The exact inline bootstrap/helper definitions execute with the final production call excluded; start=False installation uses only temporary paths",
       "The delivered offline release verifier passes"
     ],
     "APT_cache_opened": false,
@@ -68,26 +70,22 @@
     "real_job_started": false
   },
   "findings_fixed": [
-    "Direct launch could overwrite a dangling job-state symlink",
-    "An opposite-name systemd unit retained in the manager after file deletion was not previously checked"
+    "Invalid DNS labels previously passed the initial host regex",
+    "Inactive web service baselines previously bypassed unknown-exclusion coverage validation"
   ],
-  "public_artifact_review": {
-    "embedded_runtime_modules": 15,
+  "artifact_review": {
+    "embedded_runtime_modules": 16,
+    "all_delivered_modules_match_reviewed_revision": true,
     "inline_helper_matches_readable_source": true,
-    "provider_metadata_prerequisite": false,
-    "mandatory_cloud_account_or_identifier": false,
-    "company_specific_aliases_confined_to_compatibility_layout": true,
-    "known_private_inventory_credentials_or_backups_included": false,
-    "installer_explicitly_starts_apply": true,
-    "wrapper_defaults_to_plan": true
+    "client_hostname_hardcoded_in_public_package": false,
+    "local_policy_file_or_private_runtime_evidence_included": false
   },
   "preserved_controls": [
-    "Exact supported adjacent Ubuntu release paths and postboot acceptance",
-    "PHP migration only after Ubuntu24.04",
-    "Authenticated package plans, protected database compatibility lines and runtime/configuration health checks",
-    "No replacement of queued, running, failed or interrupted jobs",
-    "Recognized prelaunch code hashes, archives, admission locks and process checks",
-    "Legacy prelaunch deployment stays in its original namespace rather than migrating jobs"
+    "TLS verification and every remaining production HTTP probe",
+    "No Nginx/application configuration edits by exclusion filtering",
+    "Machine-bound root-owned0600 policy, exact approved host list and SHA256 receipt",
+    "Existing job state, units, schemas, process/admission locks and prelaunch-only code refresh protections",
+    "Ubuntu release sequencing, database compatibility-line and PHP runtime/configuration checks"
   ],
   "production_connections": 0,
   "production_changes": 0,
@@ -96,13 +94,11 @@
   "live_OS_upgrade_tested": false,
   "live_application_migration_tested": false,
   "limits": [
-    "Local fixtures and extracted Python do not reproduce every production bootloader, architecture, native APT or application environment",
-    "Machine-id alone is not clone-resistant when no valid firmware UUID is available",
-    "A recorded firmware UUID that disappears or changes holds; malformed or unreadable identity evidence is not silently ignored",
-    "Provider neutrality removes mandatory metadata/account prerequisites but does not waive existing compatibility, database, recovery or failed-job holds",
-    "Existing legacy job states remain bound to their original updater and are not upgraded to the new schema",
-    "Optional known provider repositories remain source-compatibility profiles, not prerequisites",
-    "No universal Ubuntu compatibility, live release success, tested recovery or complete vulnerability-closure claim is made",
-    "Runtime logs, collected host identifiers and configuration backups remain private"
+    "Excluding a hostname removes health evidence for that exact hostname; it does not verify or repair the excluded endpoint",
+    "The local root-owned policy is deployment-specific approval data and is intentionally absent from public source",
+    "Policy changes or appearance during a bound job cause a hold rather than silently widening exclusions",
+    "Unknown hosts and exclusion of every available probe are not accepted",
+    "Local fixtures and extracted Python do not establish universal live host compatibility, native APT success or tested recovery",
+    "No live release upgrade, live application migration or complete vulnerability-closure claim is made"
   ]
 }
