@@ -1,4 +1,4 @@
-# Ubuntu global updater v2.1.1
+# Ubuntu global updater v2.2.0
 
 One host-local installer for supported Ubuntu systems across companies and hosting providers: **finish the OS upgrade to
 24.04 first, then migrate legacy PHP to a patched supported PHP8 branch.**
@@ -14,7 +14,7 @@ are needed on the server. Readable source is included for review.
 | Ubuntu22.04 | 22.04→24.04 | Same legacy migration |
 | Ubuntu24.04 | Skip release upgrades | Migrate legacy PHP or patch a supported installed8.x branch |
 
-Every LTS hop has its own checkpoint, reboot and target-release/kernel verification.
+Every LTS hop has its own checkpoint and restart verification. Native systems verify the Ubuntu kernel; WSL verifies a new distro instance and exact reached Ubuntu release.
 Ubuntu16.04 and unknown/newer releases hold; the updater never downgrades an OS.
 There are no hostname-based replacement exclusions. Every host follows the same supported-release, package, recovery and compatibility checks.
 
@@ -37,8 +37,7 @@ firmware identity cannot be distinguished by this local binding alone.
 
 Compatibility with old deployments is isolated in `updater_layout.py`. A recognized
 preflight-only old installation can refresh its code while retaining its original
-namespace and exact wrapper. Existing queued/running/failed jobs are not overwritten
-or moved. Mixed old/new namespaces, active updater processes and unknown wrappers
+namespace and exact wrapper. Existing queued/running/failed jobs are normally preserved. The explicit recovery option below archives only a byte-identified v2.1.1 Apache preflight rejection that performed no package stages. Mixed old/new namespaces, active updater processes and unknown wrappers
 hold. Use `bash /root/ubuntu-global-updater.sh --status` for either namespace.
 Historical names are compatibility aliases, not a company requirement. Optional
 recognized provider mirrors/agent repositories remain supported when present.
@@ -47,7 +46,72 @@ This is not universal support for every Ubuntu setup. The existing release,
 architecture, bootloader, repository, database and application-layout checks still
 apply. Unknown providers' repositories require an explicit reviewed source profile;
 they are not enabled or rewritten speculatively. Current supported architecture is
-amd64; Apache/custom/container/application profiles retain their existing limits.
+amd64. Standard Apache same-branch patch profiles are supported; custom/container/application profiles retain compatibility limits.
+
+## WSL and native platform detection
+
+Kernel and local WSL evidence select native, WSL1 or WSL2 handling; environment
+variables alone never waive boot checks. WSL requires systemd already enabled.
+APT-managed Ubuntu packages and PHP are updated inside the distro. Windows/WSL
+kernel maintenance remains owned by Windows: GRUB and an Ubuntu-owned running
+kernel are explicitly outside WSL verification coverage. Custom ambiguous kernels
+require review. Native boot checks remain unchanged.
+
+WSL updates do not run `reboot`, `wsl --shutdown`, Windows shutdown or automatic
+distro termination. If a restart is needed, status becomes `waiting-manual-restart`
+and the updater service is disabled until you deliberately restart this distro.
+After saving other work, terminate this specific distro from another WSL session
+or Windows terminal and open it again. Then run:
+
+```bash
+sudo bash /root/ubuntu-global-updater.sh --resume
+sudo bash /root/ubuntu-global-updater.sh --status
+```
+
+Resume verifies the same machine, exact target release and a changed distro
+instance (PID1 and namespaces). Shared WSL kernel boot IDs may legitimately remain
+unchanged. The installed service bytes and effective command must still match.
+
+## Standard Apache PHP support
+
+The updater discovers native Apache modules, MPM, virtual hosts, handlers, PHP INI
+and extension graphs, Unix FPM pools where applicable, local HTTP/TLS health and
+live PHP/extension mappings. Supported same-branch patches preserve `mod_php`
+with prefork or existing `proxy_fcgi`/FPM; no automatic SAPI or MPM conversion is
+performed. Exact authenticated target package versions and current live code are
+required for acceptance. No public phpinfo endpoint is created.
+
+Legacy Apache PHP major migration produces an explicit same-SAPI compatibility
+plan and remains a separate migration profile. It is not claimed as automatic
+PHP7-to-8 support. The existing Nginx/FPM legacy migration path remains available.
+
+## Existing PHP repository alignment
+
+An existing canonical Ondrej PHP source can be aligned to the reached Ubuntu
+suite and re-enabled, including an OS-upgrade-disabled deb822 source. Only that
+exact PHP stanza changes; unrelated PPAs, URLs and public key bytes are preserved.
+The existing explicit signing key must match the independently reviewed PHP PPA
+fingerprint. Unknown/insecure/ambiguous sources require review. No key/repository
+is fetched or added automatically. Sources are privately backed up and rechecked
+for drift immediately before atomic replacement. Fresh authenticated same-suite
+metadata and exact package plans follow; source alignment alone is not patching.
+
+## Recover the old Apache preflight rejection
+
+For an existing v2.1.1 job stopped specifically by
+`Apache_PHP_requires_separate_migration_profile`, an explicit installer option can
+archive its code, checkpoint, logs and unit before starting a new job:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/COMMIT/install.sh | sudo bash -s -- --recover-preflight
+```
+
+Recovery requires exact recognized old code/unit/wrapper, the original host,
+empty completed stages, no running operation or installer, restored timer state,
+private evidence and no OS/package work artifacts. Other failed jobs are never
+reset. An ineligible checkpoint stays preserved. Ordinary reruns still preserve
+existing job state. Status always uses the full `/root/ubuntu-global-updater.sh`
+path; adding it to a user's PATH is unnecessary.
 
 ## Explicit local health exclusions
 
@@ -104,7 +168,7 @@ Use a reviewed full commit SHA for `COMMIT`, and run as root on the selected hos
 ```
 
 Apply starts immediately and includes service restarts, downtime and required
-reboots. The retained systemd worker continues after reboot without an open console.
+reboots on native hosts. The retained systemd worker continues after native reboot without an open console. WSL never requests Windows/VM shutdown; its manual restart checkpoint is described below.
 The installed wrapper defaults to read-only plan; this installer explicitly selects
 apply. A repeated installation preserves existing jobs; only recognized preflight-only updater files can be refreshed as described above.
 
@@ -148,7 +212,7 @@ reviewed production commit with a moving `main` URL.
 ## Compatibility holds and scope
 
 Mixed active legacy and already-installed target runtimes, multiple legacy
-branches, Apache/custom layouts, ambiguous sockets/units/jobs, incompatible
+branches, legacy Apache major migrations/custom layouts, ambiguous sockets/units/jobs, incompatible
 WordPress core and Composer applications require a reviewed additional profile.
 Extensions are preserved or explicitly rejected before cutover. Removed embedded
 modules such as WDDX, missing maintained replacement extensions, unsupported custom
@@ -181,7 +245,7 @@ This checks hashes, embedded module equality and Bash syntax without running the
 updater. On older Python it compiles only the early modules; modern modules are
 checked by the full validation under a modern interpreter. Legacy v10 source files
 may remain in repository history/root for reference; the active installer uses
-only the sixteen runtime modules listed in `release.json` and its embedded manifest.
+only the twenty-one runtime/bootstrap modules listed in `release.json` and its embedded manifest.
 
 Security floor evidence remains the reviewed October25,2026 PHP fixes for
 CVE-2026-109618/109619 plus the Ubuntu backport exception. The separate October23

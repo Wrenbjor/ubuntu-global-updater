@@ -21,6 +21,7 @@ from pathlib import Path
 
 import ubuntu_global_guard as guard
 import ubuntu_global_os as os_upgrade
+import updater_platform as platform_api
 import ubuntu_global_handoff as unattended
 import upgrade_state_guard_v10_1 as legacy
 import ubuntu_global_support as support
@@ -28,6 +29,7 @@ import ubuntu_global_early as early
 import updater_layout as layout
 import host_identity as host_id
 import health_policy
+import php_repository
 
 class DeferredModule:
     """Bionic must reach Noble before importing modern runtime migration code."""
@@ -60,7 +62,7 @@ def need(value, code):
 
 def error_code(error):
     known = (UpdateError, guard.PolicyError, unattended.HandoffError, os_upgrade.OSHold, early.EarlyError,
-             layout.LayoutError, host_id.IdentityError, health_policy.HealthPolicyError)
+             layout.LayoutError, host_id.IdentityError, health_policy.HealthPolicyError, platform_api.PlatformError, php_repository.RepositoryError)
     return str(error) if isinstance(error, known) else type(error).__name__
 
 def digest(data):
@@ -133,7 +135,7 @@ def identity():
     return dict(ubuntu=release.get('ID') == 'ubuntu', hostname=os.uname().nodename, machine_id=Path('/etc/machine-id').read_text().strip(),
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                 os_id=release.get('ID'), release=release.get('VERSION_ID'), codename=release.get('VERSION_CODENAME'),
-                kernel=os.uname().release)
+                kernel=os.uname().release, platform_profile=platform_api.detect())
 
 def check_layout():
     need(layout.installer_layout()['base'] == LAYOUT['base'], 'updater_namespace_conflict')
@@ -165,7 +167,38 @@ def service_baseline():
                   and not re.match(r'^(?:apt-daily|unattended-upgrades|user@|session-|systemd-(?:hostnamed|timedated|localed))', row.split()[0]))
 
 def health_baseline():
+    plan = apache_profile_preflight()
+    if plan is not None:
+        profile = plan['baseline']
+        return dict(scope='discovered-local-PHP-Apache-vhosts', specs=profile['health_specs'],
+                    results=profile['health_baseline'], health_policy=profile['health_policy'],
+                    apache_profile_plan=plan)
     return early.health_baseline()
+
+def apache_profile_preflight():
+    import apache_php_profile as apache
+    if not apache.configured():
+        return None
+    plan = apache.prepare_plan(apache.discover(apache.NativeBackend()))
+    need(run(['/bin/systemctl', 'is-active', 'nginx'], check=False).strip() != 'active',
+         'Apache_and_active_Nginx_require_combined_verification_profile')
+    installed = {guard.php_branch(name) for name in packages() if guard.php_branch(name)}
+    need(installed <= {plan['source_branch']},
+         'Apache_other_installed_PHP_branches_require_explicit_profile')
+    if not plan['supported']:
+        emit('Apache-PHP', 'compatibility-plan-required', source_branch=plan['source_branch'],
+             target_branch=plan['target_branch'], sapi=plan['sapi'], mpm=plan['mpm'],
+             limitations=plan['limitations'], configuration_actions=plan['configuration_actions'])
+        raise UpdateError('Apache_PHP_same_SAPI_compatibility_plan_required')
+    if plan['sapi'] == 'fpm-fcgi' and identity()['release'] == '24.04':
+        # Modern service/config inspection is deferred until Noble, then runs
+        # before repository alignment or package changes as well as activation.
+        import php_legacy_runner as php
+        php.target_unit(plan['source_branch'])
+        if plan['baseline']['runtime'].get('fpm'):
+            validate_native_service('php' + plan['source_branch'] + '-fpm.service')
+        run(['/usr/sbin/php-fpm' + plan['source_branch'], '-t'])
+    return plan
 
 def check_health(before):
     return early.check_health(before)
@@ -175,17 +208,24 @@ def config_tests():
         run(['/usr/sbin/nginx', '-t'])
     if shutil.which('sshd'):
         run(['/usr/sbin/sshd', '-t'])
+    if shutil.which('apache2ctl'):
+        run(['/usr/sbin/apache2ctl', 'configtest'])
     for binary in Path('/usr/sbin').glob('php-fpm*'):
         need(re.fullmatch(r'php-fpm\d+\.\d+', binary.name), 'unknown_PHP_FPM_executable')
         run([str(binary), '-t'])
     return True
 
 def boot_targets():
+    if platform_api.detect()['is_wsl']:
+        # Host-owned kernel/bootloader: coverage is recorded in every snapshot.
+        return True
     need(Path('/boot/grub/grub.cfg').is_file() and bool(list(Path('/boot').glob('vmlinuz-*'))), 'GRUB_kernel_boot_targets_missing')
     need(run(['/usr/bin/findmnt', '-n', '-o', 'OPTIONS', '/']).strip().split(',')[0] != 'ro', 'root_filesystem_read_only')
     return True
 
 def current_target_kernel():
+    if platform_api.detect()['is_wsl']:
+        return True
     cache = apt_cache()
     name = 'linux-image-' + os.uname().release
     need(name in cache and cache[name].installed is not None, 'running_kernel_not_package_owned')
@@ -410,10 +450,92 @@ def package_update(phase='patch', node_version=None):
 def refresh():
     package_command(['/usr/bin/apt-get'] + APT_OPTIONS + ['-o', 'APT::Update::Error-Mode=any', 'update'], 'refresh')
 
+def align_php_repository():
+    reviewed = php_repository.plan(identity()['release'])
+    write_json(BASE / ('plan-PHP-repository-' + unique_stamp() + '.json'), reviewed)
+    if reviewed['change'] is None:
+        return dict(status=reviewed['status'], changed=False)
+    archive = BASE / ('PHP-repository-' + unique_stamp())
+    archive.mkdir(mode=0o700)
+    return php_repository.apply(reviewed, archive)
+
 def php_stage():
     need(identity()['release'] == '24.04', 'PHP_stage_requires_verified_Ubuntu_24_04')
     import php_legacy_runner as php
     import php_legacy_packages as pkg
+    import apache_php_profile as apache
+    apache_plan = apache_profile_preflight()
+    if apache_plan is not None:
+        state = guard.read_private(BASE / 'state.json')
+        saved = state.get('health', {}).get('apache_profile_plan')
+        need(saved is not None and saved['sapi'] == apache_plan['sapi']
+             and saved['mpm'] == apache_plan['mpm']
+             and saved['source_branch'] == apache_plan['source_branch'],
+             'initial_Apache_profile_missing_or_topology_changed')
+        security = apache.authenticated_installed(pkg.Backend(), apache_plan['baseline'])
+        if apache_plan['baseline']['runtime'].get('apache_active'):
+            initial = apache.verify(apache.NativeBackend(), saved,
+                                    expected_packages=security['expected_packages'])
+            pending = {'live_PHP_code_and_extensions_current', 'Apache_executables_current',
+                       'runtime_extension_coverage_preserved', 'PHP_API_directory_preserved'}
+            need(all(value for key, value in initial['checks'].items() if key not in pending),
+                 'Apache_patch_configuration_or_health_verification_failed_before_reload')
+            need(initial['status'] == 'apache_php_patch_verified'
+                 or initial.get('stale_runtime_mapping_or_executable_observed') is True,
+                 'Apache_nonstale_runtime_coverage_or_API_mismatch_requires_review_before_reload')
+            fpm_unit = None
+            if saved['sapi'] == 'fpm-fcgi':
+                fpm_unit = 'php' + saved['source_branch'] + '-fpm.service'
+                php.target_unit(saved['source_branch'])
+                validate_native_service(fpm_unit)
+                run(['/usr/sbin/php-fpm' + saved['source_branch'], '-t'])
+                run(['/bin/systemctl', 'reload', fpm_unit])
+            validate_native_service('apache2.service')
+            run(['/usr/sbin/apache2ctl', '-t'])
+            run(['/bin/systemctl', 'reload', 'apache2.service'])
+            deadline = time.monotonic() + 30
+            while True:
+                result = apache.verify(apache.NativeBackend(), saved,
+                                       expected_packages=security['expected_packages'])
+                if result['status'] == 'apache_php_patch_verified':
+                    break
+                checks = result['checks']
+                need(all(value for key, value in checks.items() if key not in pending),
+                     'Apache_patch_configuration_or_health_verification_failed')
+                need(result.get('stale_runtime_mapping_or_executable_observed') is True,
+                     'Apache_nonstale_runtime_coverage_or_API_mismatch_requires_review')
+                if time.monotonic() >= deadline:
+                    # Restart only the canonical service whose actual process
+                    # executable/mapping was observed stale, never its proxy.
+                    stale_units = result.get('stale_services', [])
+                    allowed = {'apache2.service'} | ({fpm_unit} if fpm_unit else set())
+                    need(stale_units and len(stale_units) == len(set(stale_units))
+                         and set(stale_units) <= allowed,
+                         'stale_Apache_PHP_service_identity_missing_or_unapproved')
+                    for unit in stale_units:
+                        validate_native_service(unit)
+                        if unit == fpm_unit:
+                            php.target_unit(saved['source_branch'])
+                            run(['/usr/sbin/php-fpm' + saved['source_branch'], '-t'])
+                        else:
+                            run(['/usr/sbin/apache2ctl', '-t'])
+                        run(['/bin/systemctl', 'restart', unit])
+                    result = apache.verify(apache.NativeBackend(), saved,
+                                           expected_packages=security['expected_packages'])
+                    need(result['status'] == 'apache_php_patch_verified',
+                         'Apache_old_workers_or_modules_remain_after_controlled_restart')
+                    result['controlled_native_service_restarts'] = stale_units
+                    if 'apache2.service' in stale_units:
+                        result['controlled_native_Apache_restart'] = True
+                    break
+                time.sleep(1)
+        else:
+            result = apache.verify(apache.NativeBackend(), saved,
+                                   expected_packages=security['expected_packages'])
+            need(result['status'] == 'apache_php_configured_patch_verified_inactive_runtime_not_claimed',
+                 'inactive_Apache_configuration_verification_failed')
+        result['authenticated_packages'] = security
+        return result
     current = packages()
     branches = sorted({guard.php_branch(n) for n in current if guard.php_branch(n)})
     need(not any(branch not in pkg.LEGACY_BRANCHES and branch not in pkg.FLOORS for branch in branches),
@@ -506,6 +628,47 @@ def work_stage(state, name, callback):
     emit(name, 'complete')
     return result
 
+def request_restart(state, snap, reason):
+    """Save before any restart; WSL never requests host or kernel shutdown."""
+    profile = snap['platform_profile']
+    if profile['is_wsl']:
+        pending = platform_api.restart_checkpoint(profile, snap['release'])
+        pending['reason'] = reason
+        values = dict(status='waiting-manual-restart', wsl_restart=pending)
+        if reason == 'final':
+            values['final_reboot'] = dict(boot_id=snap['boot_id'], wsl_restart=pending)
+        elif reason == 'prerequisite':
+            values['prerequisite_reboot'] = dict(boot_id=snap['boot_id'], release=snap['release'], wsl_restart=pending)
+        state_update(state, **values)
+        return 'waiting-manual-restart'
+    values = dict(status='waiting-reboot')
+    if reason == 'final':
+        values['final_reboot'] = dict(boot_id=snap['boot_id'])
+    elif reason == 'prerequisite':
+        values['prerequisite_reboot'] = dict(boot_id=snap['boot_id'], release=snap['release'])
+    state_update(state, **values)
+    return 'waiting-reboot'
+
+def wsl_accept_os_boot(receipt, snap, proof, restart):
+    """Bridge a distro-instance proof into the native adapter's boot API.
+
+    Only copies passed to accept_boot use instance tokens. Persisted receipt
+    boot_id/accepted_boot_id remain actual kernel IDs. Execute always uses real
+    boot IDs, including the native worker's /proc identity check.
+    """
+    accepted_instance = platform_api.accept_restart(snap['platform_profile'], restart)
+    proof = dict(proof, platform=snap['platform_profile']['platform'],
+                 bootloader_coverage='not-applicable-WSL-host-owned',
+                 running_kernel_coverage='not-applicable-WSL-host-owned',
+                 restart_coverage='verified-distro-instance')
+    before = dict(receipt, boot_id='wsl-instance:' + restart['before_instance']['sha256'])
+    current = dict(snap, boot_id='wsl-instance:' + snap['platform_profile']['instance']['sha256'])
+    accepted = os_upgrade.accept_boot(before, current, proof)
+    accepted.update(boot_id=receipt['boot_id'], accepted_boot_id=snap['boot_id'],
+                    restart_proof_kind='wsl-distro-instance-not-kernel-boot',
+                    wsl_instance_boot_proof=accepted_instance)
+    return accepted
+
 def worker():
     need(os.geteuid() == 0, 'root_required')
     check_layout()
@@ -522,11 +685,14 @@ def worker():
     state = guard.read_private(BASE / 'state.json')
     check_job_identity(state)
     health_policy.bind_job(state.get('health',{}).get('health_policy'))
-    need(state.get('status') in ('queued', 'waiting-reboot'), 'no_automatic_retry_after_failure')
+    need(state.get('status') in ('queued', 'waiting-reboot', 'waiting-manual-restart'), 'no_automatic_retry_after_failure')
     need(not state.get('operation_running'), 'interrupted_package_operation_requires_review')
+    if state.get('status') == 'waiting-manual-restart':
+        platform_api.accept_restart(identity()['platform_profile'], state.get('wsl_restart'))
     old_workflow()
     saved = BASE / 'unattended-state.json'
     try:
+        apache_profile_preflight()
         if saved.exists():
             unattended.restore_timers(unattended.System(), unattended.load_state(saved))
             saved.rename(BASE / ('unattended-state-' + unique_stamp() + '.json'))
@@ -534,12 +700,13 @@ def worker():
         state_update(state, status='running')
         snap = snapshot()
         need(snap['dpkg_clean'] and not snap['holds'], 'unclean_dpkg_or_held_packages')
-        need(not any(n.startswith('libapache2-mod-php') for n in snap['packages']), 'Apache_PHP_requires_separate_migration_profile')
         # OS adapter is responsible for signed next-LTS frontend and precommit
         # validation; its durable receipt gates every reboot and next hop.
         os_result = run_os(state, snap)
-        if os_result == 'waiting-reboot':
+        if os_result in ('waiting-reboot', 'waiting-manual-restart'):
             return
+        if 'PHP-repository' not in state['completed']:
+            work_stage(state, 'PHP-repository', align_php_repository)
         if 'packages' not in state['completed']:
             refresh()
             work_stage(state, 'packages', package_update)
@@ -555,16 +722,23 @@ def worker():
         need(after['release'] == '24.04', 'target_OS_not_reached')
         if after['reboot_required']:
             previous = state.get('final_reboot')
-            need(not previous or previous['boot_id'] != after['boot_id'], 'final_reboot_not_completed')
-            state_update(state, status='waiting-reboot', final_reboot=dict(boot_id=after['boot_id']))
+            if after['platform_profile']['is_wsl']:
+                need(not previous, 'reboot_required_persists_after_manual_WSL_restart')
+            else:
+                need(not previous or previous['boot_id'] != after['boot_id'], 'final_reboot_not_completed')
+            request_restart(state, after, 'final')
             return
         if state.get('final_reboot'):
-            need(state['final_reboot']['boot_id'] != after['boot_id'], 'final_new_boot_not_verified')
+            if after['platform_profile']['is_wsl']:
+                platform_api.accept_restart(after['platform_profile'], state['final_reboot']['wsl_restart'])
+            else:
+                need(state['final_reboot']['boot_id'] != after['boot_id'], 'final_new_boot_not_verified')
             current_target_kernel()
         restarted = refresh_live_services(state.get('expected_services', state['services']))
         config_tests(); check_health(state['health'])
         report = dict(status='completed', before=state['identity'], after=after,
                       completed=state['completed'], reboot_required=after['reboot_required'], restarted_services=restarted,
+                      platform_coverage=after['platform_profile'],
                       coverage='Ubuntu and configured APT packages; supported PHP profile; APT Node',
                       excluded='Application dependencies, WordPress/plugins/themes, containers and custom runtimes',
                       additional_PHP_advisory='2026-10-23 session upload progress configuration advisory requires separate effective-setting verification')
@@ -581,24 +755,43 @@ def worker():
     finally:
         if saved.exists():
             unattended.restore_timers(unattended.System(), unattended.load_state(saved))
-        os.close(php_lock); os.close(fd)
-        if state.get('status') == 'waiting-reboot':
+        for php_lock in shared_locks:
+            os.close(php_lock)
+        os.close(fd)
+        if state.get('status') == 'waiting-manual-restart':
+            run(['/bin/systemctl', 'disable', UNIT])
+            emit('reboot', 'manual-WSL-distro-restart-required', checkpoint=state['wsl_restart'],
+                 resume='Run the updater with --resume after manually restarting this WSL distro')
+        elif state.get('status') == 'waiting-reboot':
+            need(not platform_api.detect()['is_wsl'], 'automatic_WSL_reboot_forbidden')
             emit('reboot', 'scheduled-after-saved-checkpoint')
             run(['/bin/systemctl', '--no-block', 'reboot'])
 
 def run_os(state, snap):
+    wsl = snap['platform_profile']['is_wsl']
     if state.get('os_complete'):
         need(snap['release'] == '24.04', 'completed_OS_target_drift')
         return 'complete'
     receipt = state.get('os_receipt')
-    decision = os_upgrade.plan(snap, receipt)
+    if wsl and receipt and receipt.get('status') == 'boot-verified':
+        accepted = receipt.get('wsl_instance_boot_proof', {})
+        need(accepted.get('instance') == snap['platform_profile']['instance'], 'accepted_WSL_instance_drift')
+    # At target, host-kernel reboot markers must not prevent PHP maintenance.
+    # They remain visible and are handled by the final manual restart gate.
+    planning = dict(snap, reboot_required=False) if wsl and not receipt and snap['release'] == '24.04' else snap
+    decision = os_upgrade.plan(planning, receipt)
+    if wsl and receipt and receipt.get('status') == 'installed-pending-reboot':
+        platform_api.accept_restart(snap['platform_profile'], state.get('wsl_restart'))
+        decision = dict(action='verify-hop')
     if decision['action'] == 'verify-hop':
         capture_path = Path(state['os_capture'])
         preserved = support.restore_verify(guard.read_private(capture_path / 'manifest.json'), capture_path, snap['codename'])
         need(preserved['configuration_preserved'] and preserved['vendor_sources_restored'], 'OS_postboot_configuration_or_sources_require_review')
         assert_services(state['services']); config_tests(); check_health(state['health'])
-        accepted = os_upgrade.accept_boot(receipt, snap, dict(configuration_preserved=True, services=True,
-                   boot_targets=boot_targets(), target_kernel=current_target_kernel(), vendor_sources_restored=True))
+        proof = dict(configuration_preserved=True, services=True, boot_targets=boot_targets(),
+                     target_kernel=current_target_kernel(), vendor_sources_restored=True)
+        accepted = (wsl_accept_os_boot(receipt, snap, proof, state['wsl_restart']) if wsl
+                    else os_upgrade.accept_boot(receipt, snap, proof))
         state_update(state, os_receipt=accepted)
         receipt = accepted
         decision = os_upgrade.plan(snapshot(), receipt)
@@ -609,9 +802,12 @@ def run_os(state, snap):
     if decision['action'] == 'reboot':
         prior = state.get('prerequisite_reboot')
         if prior:
-            need(prior['boot_id'] != snap['boot_id'], 'prerequisite_reboot_not_completed')
-        state_update(state, status='waiting-reboot', prerequisite_reboot=dict(boot_id=snap['boot_id'], release=snap['release']))
-        return 'waiting-reboot'
+            if wsl:
+                platform_api.accept_restart(snap['platform_profile'], prior.get('wsl_restart'))
+                need(not snap['reboot_required'], 'prerequisite_marker_persists_after_manual_WSL_restart')
+            else:
+                need(prior['boot_id'] != snap['boot_id'], 'prerequisite_reboot_not_completed')
+        return request_restart(state, snap, 'prerequisite')
     # Capture before the first refresh, including sources that may no longer
     # publish this old PHP suite. Reuse original bytes across a prerequisite
     # reboot; never turn our paused source text into the restore baseline.
@@ -636,8 +832,7 @@ def run_os(state, snap):
         snap = snapshot()
         decision = os_upgrade.plan(snap, receipt)
         if decision['action'] == 'reboot':
-            state_update(state, status='waiting-reboot', prerequisite_reboot=dict(boot_id=snap['boot_id'], release=snap['release']))
-            return 'waiting-reboot'
+            return request_restart(state, snap, 'prerequisite')
         need(decision['action'] == 'upgrade', 'OS_prerequisites_not_ready')
     proof = install_guard(dict(packages=packages(), machine_id=snap['machine_id'], phase='os', defer_php=True))
     state_update(state, operation='OS-' + snap['release'], operation_running=True)
@@ -646,7 +841,8 @@ def run_os(state, snap):
         current = snapshot()
         need(current['machine_id'] == state['identity']['machine_id'], 'OS_preflight_identity_changed')
         assert_services(state['services']); config_tests(); check_health(state['health'])
-        need(shutil.disk_usage('/').free >= 6 * 1024**3 and shutil.disk_usage('/boot').free >= 512 * 1024**2, 'OS_disk_space_insufficient')
+        need(shutil.disk_usage('/').free >= 6 * 1024**3 and
+             (wsl or shutil.disk_usage('/boot').free >= 512 * 1024**2), 'OS_disk_space_insufficient')
         os_upgrade.guard_files(proof)
         return dict(identity=True, configuration_backup=True, package_guard=True, boot_targets=boot_targets(),
                     disk_space=True, services=True, no_active_installer=not unattended.System().locks())
@@ -660,10 +856,19 @@ def run_os(state, snap):
     try:
         backend = os_upgrade.NativeBackend(snapshot, preflight, postinstall)
         result = os_upgrade.execute(decision, BASE / ('OS-' + snap['release']), backend, proof)
-        state_update(state, operation_running=False, os_receipt=result, status='waiting-reboot')
+        state_update(state, operation_running=False, os_receipt=result)
+        if wsl:
+            return request_restart(state, snapshot(), 'OS-hop')
+        state_update(state, status='waiting-reboot')
     finally:
         remove_guard(proof)
     return 'waiting-reboot'
+
+def unit_contents():
+    return ('[Unit]\nDescription=Ubuntu and runtime updater\nAfter=network-online.target\nWants=network-online.target\n'
+            '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -B ' + str(PAYLOAD / 'ubuntu_global.py') + ' --worker\n'
+            'TimeoutStartSec=infinity\nTimeoutStopSec=infinity\nKillMode=process\nRestart=no\nUMask=0077\n'
+            '[Install]\nWantedBy=multi-user.target\n')
 
 def launch_locked():
     need(os.geteuid() == 0, 'root_required')
@@ -683,10 +888,7 @@ def launch_locked():
     check_layout()
     write_json(BASE / 'state.json', dict(schema=2, status='queued', identity=current, host_binding=binding,
                services=snap['services'], health=health, completed=[], operation_running=False))
-    unit = ('[Unit]\nDescription=Ubuntu and runtime updater\nAfter=network-online.target\nWants=network-online.target\n'
-            '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -B ' + str(PAYLOAD / 'ubuntu_global.py') + ' --worker\n'
-            'TimeoutStartSec=infinity\nTimeoutStopSec=infinity\nKillMode=process\nRestart=no\nUMask=0077\n'
-            '[Install]\nWantedBy=multi-user.target\n')
+    unit = unit_contents()
     path = Path('/etc/systemd/system') / UNIT
     need(not path.exists() and not path.is_symlink(), 'existing_service_requires_review')
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
@@ -695,7 +897,7 @@ def launch_locked():
     run(['/bin/systemctl', 'daemon-reload'])
     run(['/bin/systemctl', 'enable', UNIT])
     run(['/bin/systemctl', 'start', '--no-block', UNIT])
-    print('Updater started. Status: ubuntu-global-updater.sh --status')
+    print('Updater started. Status: sudo bash /root/ubuntu-global-updater.sh --status')
 
 def launch():
     check_layout()
@@ -717,6 +919,41 @@ def launch():
     finally:
         os.close(fd)
 
+def resume_manual_restart():
+    need(os.geteuid() == 0, 'root_required')
+    check_layout();private_directory(BASE)
+    fd = os.open(BASE / 'installer.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    lock = os.open(BASE / 'worker.lock', os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        for selected,name in ((fd,'installer.lock'),(lock,'worker.lock')):
+            info = os.fstat(selected)
+            named = (BASE/name).lstat()
+            need(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1 and not info.st_mode&0o077
+                 and (info.st_dev,info.st_ino)==(named.st_dev,named.st_ino), 'unsafe_resume_lock')
+            fcntl.flock(selected,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        state = guard.read_private(BASE / 'state.json');check_job_identity(state)
+        need(state.get('status')=='waiting-manual-restart' and not state.get('operation_running'), 'manual_restart_checkpoint_required')
+        platform_api.accept_restart(platform_api.detect(), state.get('wsl_restart'))
+        raw = run(['/bin/systemctl','show',UNIT,'-p','LoadState','-p','ActiveState','-p','MainPID','-p','FragmentPath',
+                   '-p','DropInPaths','-p','Environment','-p','EnvironmentFiles'])
+        props = dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
+        need(props.get('LoadState')=='loaded' and props.get('MainPID')=='0' and props.get('ActiveState') in ('inactive','failed'), 'updater_service_still_running')
+        unit = Path('/etc/systemd/system') / UNIT
+        need(props.get('FragmentPath')==str(unit) and unit.is_file() and not unit.is_symlink() and unit.lstat().st_uid==0
+             and unit.lstat().st_nlink==1 and not unit.lstat().st_mode&0o022 and unit.read_text()==unit_contents()
+             and all(props.get(key)=='' for key in ('DropInPaths','Environment','EnvironmentFiles')), 'unrecognized_resume_service')
+        run(['/bin/systemctl','daemon-reload'])
+        effective = run(['/bin/systemctl','show',UNIT,'-p','ExecStart','-p','DropInPaths','-p','Environment','-p','EnvironmentFiles'])
+        loaded = dict(line.split('=',1) for line in effective.splitlines() if '=' in line)
+        commands = re.findall(r'argv\[\]=([^;]+) ;',loaded.get('ExecStart',''))
+        need(commands==['/usr/bin/python3 -B '+str(PAYLOAD / 'ubuntu_global.py')+' --worker']
+             and all(loaded.get(key)=='' for key in ('DropInPaths','Environment','EnvironmentFiles')), 'effective_resume_command_changed')
+        run(['/bin/systemctl','enable',UNIT])
+    finally:
+        os.close(lock);os.close(fd)
+    run(['/bin/systemctl','start','--no-block',UNIT])
+    print('Updater resumed. Status: sudo bash /root/ubuntu-global-updater.sh --status')
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     mode = p.add_mutually_exclusive_group()
@@ -724,19 +961,31 @@ def main():
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--worker', action='store_true')
     mode.add_argument('--status', action='store_true')
+    mode.add_argument('--resume', action='store_true', help='Resume after a verified manual WSL distro restart')
     args = p.parse_args()
     if args.apply:
         launch()
     elif args.worker:
         worker()
+    elif args.resume:
+        resume_manual_restart()
     elif args.status:
-        print(json.dumps(guard.read_private(BASE / 'state.json'), indent=2))
-        run(['/bin/systemctl', '--no-pager', 'status', UNIT], check=False)
+        if not (BASE / 'state.json').exists() and not (BASE / 'state.json').is_symlink():
+            print(json.dumps(dict(status='not-started', operation_running=False,
+                  message='Updater code is installed. Use --plan to review or --apply to start.',
+                  archived_preflight_count=len(list(BASE.glob('recovered-preflight-*')))),indent=2))
+        else:
+            print(json.dumps(guard.read_private(BASE / 'state.json'), indent=2))
+            run(['/bin/systemctl', '--no-pager', 'status', UNIT], check=False)
     else:
         value = snapshot()
         node_inventory = node.collect_snapshot() if value['release'] == '24.04' else dict(status='deferred-until-Ubuntu24.04')
+        import apache_php_profile as apache
+        apache_plan = apache.prepare_plan(apache.discover(apache.NativeBackend())) if apache.configured() else dict(status='not-configured')
         print(json.dumps(dict(mode='plan', production_changes=0, inventory=value,
-                             OS=os_upgrade.plan(value), node=node_inventory), indent=2))
+                             platform=platform_api.plan(value['platform_profile']),
+                             PHP_repository=php_repository.plan(value['release']),
+                             Apache_PHP=apache_plan,OS=os_upgrade.plan(value), node=node_inventory), indent=2))
 
 if __name__ == '__main__':
     try:

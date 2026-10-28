@@ -34,7 +34,8 @@ def directory(path,uid,create=False):
     require(stat.S_ISDIR(info.st_mode) and info.st_uid==uid and stat.S_IMODE(info.st_mode)==0o700
             and path.resolve()==path,'unsafe_updater_directory')
 def native_unit_state(unit=UNIT):
-    result=subprocess.run(['/bin/systemctl','show',unit,'-p','LoadState','-p','ActiveState','-p','MainPID'],
+    result=subprocess.run(['/bin/systemctl','show',unit,'-p','LoadState','-p','ActiveState','-p','MainPID',
+                          '-p','UnitFileState','-p','FragmentPath','-p','DropInPaths','-p','Job'],
                           stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10)
     values=dict(line.split('=',1) for line in result.stdout.decode().splitlines() if '=' in line)
     return values
@@ -114,7 +115,7 @@ def write_new(path,data,mode=0o600):
 
 def install_bundle(files,allowed_payloads,base=None,
                    wrapper=Path('/root/ubuntu-global-updater.sh'),
-                   unit_paths=None,system_reader=None,start=True,owner_uid=None):
+                   unit_paths=None,system_reader=None,start=True,owner_uid=None,recover_preflight=False):
     uid=os.geteuid() if owner_uid is None else owner_uid
     require(not start or uid==os.geteuid()==0,'root_required')
     selected=layout.installer_layout() if base is None else layout.layout(str(base)) if str(base) in (layout.GENERIC_BASE,layout.LEGACY_BASE) else layout.layout()
@@ -129,8 +130,42 @@ def install_bundle(files,allowed_payloads,base=None,
     lockfd=os.open(str(base/'installer.lock'),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
     info=os.fstat(lockfd)
     require(stat.S_ISREG(info.st_mode) and info.st_uid==uid and not info.st_mode&0o077 and info.st_nlink==1,'unsafe_installer_lock')
+    shared=[]
     try:
         fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        recovery=None
+        if recover_preflight and exists(base/'state.json'):
+            # Explicit recovery is limited to a byte-identified, idle v2.1.1
+            # Apache preflight rejection. It never resumes a package operation.
+            import preflight_recovery
+            import ubuntu_global_handoff as handoff
+            try:
+                for name in layout.existing_shared_lock_paths():
+                    path=Path(name);directory(path.parent,uid,create=True)
+                    sharedfd=os.open(str(path),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+                    actual=os.fstat(sharedfd)
+                    require(stat.S_ISREG(actual.st_mode) and actual.st_uid==uid and actual.st_nlink==1
+                            and not actual.st_mode&0o077,'unsafe_recovery_shared_lock')
+                    fcntl.flock(sharedfd,fcntl.LOCK_EX|fcntl.LOCK_NB);shared.append(sharedfd)
+                require(len(unit_paths)>=1,'recovery_unit_path_required')
+                reviewed=preflight_recovery.prepare_recovery(base,wrapper,unit_paths[0],system_reader,lockfd,owner_uid=uid)
+                timer_file=base/'unattended-state.json'
+                if exists(timer_file):
+                    saved=handoff.load_state(timer_file);system=handoff.System()
+                    for name,prior in saved.items():
+                        now=system.timer(name)
+                        require(now['enabled']==prior['enabled'] and now['active']==prior['active'],
+                                'preflight_timer_restoration_requires_review')
+                def unit_control(action):
+                    args=['/bin/systemctl',action]+([selected['unit']] if action=='reset-failed' else [])
+                    result=subprocess.run(args,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+                    # reset-failed after daemon-reload may report the removed
+                    # unit is not loaded; manager state is verified afterward.
+                    require(result.returncode==0 or action=='reset-failed','recovery_unit_control_failed')
+                recovery=preflight_recovery.apply_recovery(reviewed,system_reader,unit_control,lockfd,owner_uid=uid)
+            except Exception:
+                # Outer finally retains admission while releasing shared locks.
+                raise
         no_job(base,unit_paths,system_reader,wrapper,uid)
         wrapper_parent(wrapper,uid)
         if exists(wrapper):
@@ -153,8 +188,9 @@ def install_bundle(files,allowed_payloads,base=None,
             os.rename(str(staged),str(payload));sync_directory(base)
         if not exists(wrapper):write_new(wrapper,wrapper_bytes,0o700);sync_directory(wrapper.parent)
         no_job(base,unit_paths,system_reader,wrapper,uid)
-        result=dict(status='prelaunch-payload-ready',version='2.1.1',previous_payload_archived=archive.name if archive else None,
+        result=dict(status='prelaunch-payload-ready',version='2.2.0',previous_payload_archived=archive.name if archive else None,
                     source_sha256=new_hashes,application_configuration_changes=0,job_state_changes=0)
+        if recovery:result['preflight_recovery']=recovery;result['job_state_changes']='exact_preflight_archived_with_evidence'
         record_fd,record=tempfile.mkstemp(prefix='installation-',suffix='.json',dir=str(base))
         with os.fdopen(record_fd,'wb') as stream:
             stream.write((json.dumps(result,sort_keys=True)+'\n').encode());stream.flush();os.fsync(stream.fileno())
@@ -164,6 +200,10 @@ def install_bundle(files,allowed_payloads,base=None,
             os.set_inheritable(lockfd,True)
             environment=dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C')
             environment[selected['envkey']]=str(lockfd)
+            for sharedfd in shared:os.close(sharedfd)
+            shared=[]
             os.execve('/bin/bash',['/bin/bash',str(wrapper),'--apply'],environment)
         return result
-    finally:os.close(lockfd)
+    finally:
+        for sharedfd in shared:os.close(sharedfd)
+        os.close(lockfd)
