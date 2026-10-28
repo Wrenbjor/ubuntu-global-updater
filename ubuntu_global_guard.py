@@ -164,7 +164,7 @@ def main():
         return 0
     except Exception as error:
         code = str(error) if isinstance(error, PolicyError) else 'local_guard_error'
-        print('VisionLine package transaction stopped: ' + code, file=sys.stderr)
+        print('Ubuntu package transaction stopped: ' + code, file=sys.stderr)
         return 42
 
 if __name__ == '__main__':

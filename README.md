@@ -1,6 +1,6 @@
-# Ubuntu global updater v2.0.2
+# Ubuntu global updater v2.1.0
 
-One installer for a selected DigitalOcean Ubuntu host: **finish the OS upgrade to
+One host-local installer for supported Ubuntu systems across companies and hosting providers: **finish the OS upgrade to
 24.04 first, then migrate legacy PHP to a patched supported PHP8 branch.**
 `install.sh` embeds every required module; no separate downloads or Git checkout
 are needed on the server. Readable source is included for review.
@@ -25,6 +25,29 @@ supported branch is preserved when retiring a dormant legacy branch. Detection d
 not assume image labels, default `php -v`, or installed package presence prove the
 running web version. Pools, extensions, source API/ABI, CLI, actual Nginx sockets,
 workers and local application health are checked.
+
+## Provider-neutral operation and existing installations
+
+Fresh installations use `ubuntu-global-updater.service`,
+`/var/lib/ubuntu-global-updater`, and a generic APT guard. No cloud API token,
+Droplet ID, team identity, hostname allowlist, or cloud metadata request is needed.
+Jobs bind to a validated local `/etc/machine-id` plus firmware UUID when usable,
+and recheck that binding on resume. A cloned machine without distinct local or
+firmware identity cannot be distinguished by this local binding alone.
+
+Compatibility with old deployments is isolated in `updater_layout.py`. A recognized
+preflight-only old installation can refresh its code while retaining its original
+namespace and exact wrapper. Existing queued/running/failed jobs are not overwritten
+or moved. Mixed old/new namespaces, active updater processes and unknown wrappers
+hold. Use `bash /root/ubuntu-global-updater.sh --status` for either namespace.
+Historical names are compatibility aliases, not a company requirement. Optional
+recognized provider mirrors/agent repositories remain supported when present.
+
+This is not universal support for every Ubuntu setup. The existing release,
+architecture, bootloader, repository, database and application-layout checks still
+apply. Unknown providers' repositories require an explicit reviewed source profile;
+they are not enabled or rewritten speculatively. Current supported architecture is
+amd64; Apache/custom/container/application profiles retain their existing limits.
 
 ## Host eligibility
 
@@ -69,8 +92,8 @@ apply. A repeated installation preserves existing jobs; only recognized prefligh
 
 ```bash
 bash /root/ubuntu-global-updater.sh --status
-journalctl -fu visionline-global-updater.service
-cat /var/lib/visionline-global-updater/report.json
+journalctl -fu ubuntu-global-updater.service
+cat /var/lib/ubuntu-global-updater/report.json
 ```
 
 Use the reviewed installer SHA256 for download-first checksum verification when
@@ -140,7 +163,7 @@ This checks hashes, embedded module equality and Bash syntax without running the
 updater. On older Python it compiles only the early modules; modern modules are
 checked by the full validation under a modern interpreter. Legacy v10 source files
 may remain in repository history/root for reference; the active installer uses
-only the thirteen runtime modules listed in `release.json` and its embedded manifest.
+only the fifteen runtime modules listed in `release.json` and its embedded manifest.
 
 Security floor evidence remains the reviewed October25,2026 PHP fixes for
 CVE-2026-109618/109619 plus the Ubuntu backport exception. The separate October23

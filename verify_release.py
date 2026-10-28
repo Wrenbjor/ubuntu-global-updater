@@ -16,7 +16,7 @@ for item in tree.body:
 raw=gzip.decompress(base64.b64decode(values['BLOB']))
 assert hashlib.sha256(raw).hexdigest()==values['EXPECTED']
 files=json.loads(raw);assert set(files)==set(values['NAMES'])
-assert len(files)==13
+assert len(files)==15
 for name,data in files.items():assert base64.b64decode(data)==(root/name).read_bytes(),name
 subprocess.run(['/bin/bash','-n',str(root/'install.sh')],check=True)
 assert "str(wrapper),'--apply'" in script
@@ -25,4 +25,7 @@ assert "need(identity()['release'] == '24.04', 'PHP_stage_requires_verified_Ubun
 assert 'no_automatic_retry_after_failure' in core
 helper=script.split('# BEGIN_REVIEWED_PRELAUNCH_INSTALLER\n',1)[1].split('# END_REVIEWED_PRELAUNCH_INSTALLER',1)[0]
 assert helper.encode()==(root/'prelaunch_installer.py').read_bytes()
-print('V2 release checks passed; no installer or production actions executed.')
+print('Generic updater release checks passed; no installer or production actions executed.')
+
+assert 'def droplet_id(' not in core and '169.254.169.254' not in core
+assert 'host_binding=binding' in core and 'schema=2' in core

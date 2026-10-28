@@ -15,7 +15,6 @@ import stat
 import subprocess
 import sys
 import time
-import urllib.request
 import importlib
 import secrets
 from pathlib import Path
@@ -26,6 +25,8 @@ import ubuntu_global_handoff as unattended
 import upgrade_state_guard_v10_1 as legacy
 import ubuntu_global_support as support
 import ubuntu_global_early as early
+import updater_layout as layout
+import host_identity as host_id
 
 class DeferredModule:
     """Bionic must reach Noble before importing modern runtime migration code."""
@@ -36,9 +37,10 @@ class DeferredModule:
 
 node = DeferredModule('ubuntu_global_runtime')
 
-BASE = Path('/var/lib/visionline-global-updater')
-UNIT = 'visionline-global-updater.service'
-GUARD_CONF = Path('/etc/apt/apt.conf.d/99visionline-global-guard')
+LAYOUT = layout.runtime_layout(__file__)
+BASE = Path(LAYOUT['base'])
+UNIT = LAYOUT['unit']
+GUARD_CONF = Path(LAYOUT['guard'])
 PAYLOAD = Path(__file__).resolve().parent
 ENV = dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin', HOME='/root', LC_ALL='C', LANG='C',
            DEBIAN_FRONTEND='noninteractive', UCF_FORCE_CONFFOLD='1', NEEDRESTART_MODE='l')
@@ -56,7 +58,8 @@ def need(value, code):
         raise UpdateError(code)
 
 def error_code(error):
-    known = (UpdateError, guard.PolicyError, unattended.HandoffError, os_upgrade.OSHold, early.EarlyError)
+    known = (UpdateError, guard.PolicyError, unattended.HandoffError, os_upgrade.OSHold, early.EarlyError,
+             layout.LayoutError, host_id.IdentityError)
     return str(error) if isinstance(error, known) else type(error).__name__
 
 def digest(data):
@@ -131,13 +134,19 @@ def identity():
                 os_id=release.get('ID'), release=release.get('VERSION_ID'), codename=release.get('VERSION_CODENAME'),
                 kernel=os.uname().release)
 
-def droplet_id():
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open('http://169.254.169.254/metadata/v1/id', timeout=3) as response:
-        need(response.geturl() == 'http://169.254.169.254/metadata/v1/id', 'metadata_redirect_refused')
-        value = response.read(32).decode().strip()
-    need(re.fullmatch(r'[1-9][0-9]{0,19}', value), 'cannot_verify_current_droplet')
-    return value
+def check_layout():
+    need(layout.installer_layout()['base'] == LAYOUT['base'], 'updater_namespace_conflict')
+    for unit in (layout.GENERIC_UNIT,layout.LEGACY_UNIT):
+        if unit == UNIT:continue
+        raw=run(['/bin/systemctl','show',unit,'-p','LoadState','-p','ActiveState','-p','MainPID'],check=False)
+        state=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
+        need(state.get('LoadState')=='not-found' and state.get('ActiveState') in ('inactive','failed')
+             and state.get('MainPID')=='0','opposite_updater_unit_loaded_or_unknown')
+
+def check_job_identity(state):
+    need(state.get('schema') == 2, 'existing_job_schema_requires_original_updater')
+    host_id.verify(state.get('host_binding'))
+    need(identity()['machine_id'] == state['identity']['machine_id'], 'host_identity_drift')
 
 def packages():
     raw = run(['/usr/bin/dpkg-query', '-W', '-f=${binary:Package}\t${Version}\t${db:Status-Status}\n'])
@@ -480,6 +489,7 @@ def state_update(state, **values):
     write_json(BASE / 'state.json', state)
 
 def work_stage(state, name, callback):
+    check_layout(); check_job_identity(state)
     state_update(state, operation=name, operation_running=True)
     emit(name, 'started')
     result = callback()
@@ -496,15 +506,19 @@ def work_stage(state, name, callback):
 
 def worker():
     need(os.geteuid() == 0, 'root_required')
+    check_layout()
     private_directory(BASE)
     fd = os.open(BASE / 'worker.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    shared = Path('/run/visionline-php-patch-v6')
-    private_directory(shared)
-    php_lock = os.open(shared / 'worker.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    fcntl.flock(php_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    shared_locks = []
+    for shared_name in layout.existing_shared_lock_paths():
+        shared = Path(shared_name).parent
+        private_directory(shared)
+        php_lock = os.open(shared / 'worker.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(php_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        shared_locks.append(php_lock)
     state = guard.read_private(BASE / 'state.json')
-    need(identity()['machine_id'] == state['identity']['machine_id'] and droplet_id() == state['droplet_id'], 'host_identity_drift')
+    check_job_identity(state)
     need(state.get('status') in ('queued', 'waiting-reboot'), 'no_automatic_retry_after_failure')
     need(not state.get('operation_running'), 'interrupted_package_operation_requires_review')
     old_workflow()
@@ -650,19 +664,23 @@ def run_os(state, snap):
 
 def launch_locked():
     need(os.geteuid() == 0, 'root_required')
+    check_layout()
     current = identity()
     need(current['os_id'] == 'ubuntu' and current['release'] in ('18.04', '20.04', '22.04', '24.04'), 'supported_Ubuntu_18_20_22_24_required')
     old_workflow()
     private_directory(BASE)
-    need(not (BASE / 'state.json').exists(), 'existing_job_use_status_no_blind_retry')
+    need(not (BASE / 'state.json').exists() and not (BASE / 'state.json').is_symlink(), 'existing_job_use_status_no_blind_retry')
     need(not GUARD_CONF.exists() and not GUARD_CONF.is_symlink(), 'existing_APT_guard_requires_review')
     snap = snapshot()
     need(snap['dpkg_clean'], 'unclean_dpkg_before_launch')
     config_tests()
     health = health_baseline()
-    write_json(BASE / 'state.json', dict(schema=1, status='queued', identity=current, droplet_id=droplet_id(),
+    binding = host_id.capture()
+    need(binding['machine_id'] == current['machine_id'], 'host_identity_changed_during_launch')
+    check_layout()
+    write_json(BASE / 'state.json', dict(schema=2, status='queued', identity=current, host_binding=binding,
                services=snap['services'], health=health, completed=[], operation_running=False))
-    unit = ('[Unit]\nDescription=VisionLine host Ubuntu and runtime updater\nAfter=network-online.target\nWants=network-online.target\n'
+    unit = ('[Unit]\nDescription=Ubuntu and runtime updater\nAfter=network-online.target\nWants=network-online.target\n'
             '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -B ' + str(PAYLOAD / 'ubuntu_global.py') + ' --worker\n'
             'TimeoutStartSec=infinity\nTimeoutStopSec=infinity\nKillMode=process\nRestart=no\nUMask=0077\n'
             '[Install]\nWantedBy=multi-user.target\n')
@@ -677,9 +695,10 @@ def launch_locked():
     print('Updater started. Status: ubuntu-global-updater.sh --status')
 
 def launch():
+    check_layout()
     need(os.geteuid()==0,'root_required')
     private_directory(BASE)
-    inherited=os.environ.get('VISIONLINE_INSTALLER_FD')
+    inherited=os.environ.get(LAYOUT['envkey'])
     if inherited is not None:
         need(inherited.isdecimal(),'invalid_inherited_installer_lock')
         fd=int(inherited)

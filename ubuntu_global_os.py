@@ -37,7 +37,7 @@ def save_new(path,value):
  finally:os.close(fd)
 def replace_bound_private(path,value,expected):
  path=Path(path);need(digest(private_read(path))==expected,'owned_OS_baseline_changed')
- temporary=path.with_name(path.name+'.visionline-os-next')
+ temporary=path.with_name(path.name+'.ubuntu_updater-os-next')
  save_new(temporary,value)
  need(digest(private_read(path))==expected,'owned_OS_baseline_race')
  os.replace(temporary,path)
@@ -143,7 +143,7 @@ def cache_actions(packages,installed):
   actions.append(dict(name=name,old=old,new=new,action='install' if old is None else 'upgrade'))
  need(len(actions)<=10000,'OS_transaction_bound');return actions
 def load_guard(proof):
- guard_files(proof);spec=importlib.util.spec_from_file_location('visionline_global_OS_guard',proof['path']);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+ guard_files(proof);spec=importlib.util.spec_from_file_location('ubuntu_updater_global_OS_guard',proof['path']);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
  baseline=json.loads(private_read(proof['baselinepath']));need(Path('/etc/machine-id').read_text().strip()==baseline['machine_id'],'OS_guard_machine_identity_changed')
  return module,baseline
 def preserve_conffile_options(config):
@@ -183,7 +183,7 @@ def install_frontend(decision,guard_proof,event):
     sys.stdout.buffer.write(data);sys.stdout.buffer.flush()
  class NoRepair:
   def call(self,*a,**k):raise OSHold('native_automatic_repair_forbidden')
- class DistUpgradeViewVisionLineGlobal(DistUpgradeViewNonInteractive):
+ class DistUpgradeViewUbuntuGlobal(DistUpgradeViewNonInteractive):
   def __init__(self,datadir=None,logdir=None):
    super().__init__(datadir,logdir);self._installProgress=SafeProgress(logdir)
   def confirmChanges(self,summary,changes,demotions,downloadSize,actions=None,removal_bold=True):
@@ -213,7 +213,7 @@ def install_frontend(decision,guard_proof,event):
  # Native source backups may contain credentials; parent owns private backups.
  SourcesList.backup=lambda *a,**k:None
  SourcesList.restore_backup=lambda *a,**k:(_ for _ in ()).throw(OSHold('native_source_rollback_requires_diagnosis'))
- module=types.ModuleType('DistUpgrade.DistUpgradeViewVisionLineGlobal');module.DistUpgradeViewVisionLineGlobal=DistUpgradeViewVisionLineGlobal;sys.modules[module.__name__]=module
+ module=types.ModuleType('DistUpgrade.DistUpgradeViewUbuntuGlobal');module.DistUpgradeViewUbuntuGlobal=DistUpgradeViewUbuntuGlobal;sys.modules[module.__name__]=module
  return marker
 
 class NativeBackend:
@@ -241,7 +241,7 @@ acceptance and vendor-source restoration. No default callback asserts success.
   data=job/'upgrader';unpack(job/(target+'.tar.gz'),data)
   config=data/('DistUpgrade.cfg.'+decision['from_codename']);parser=configparser.ConfigParser(interpolation=None);parser.read(str(config))
   need(parser.get('Sources','From')==decision['from_codename'] and parser.get('Sources','To')==target,'signed_upgrader_release_path_mismatch')
-  for section,items in {'Files':{'LogDir':str(job/'native-logs')},'Distro':{'RemoveObsoletes':'False'},'View':{'View':'DistUpgradeViewVisionLineGlobal'},'NonInteractive':{'ForceOverwrite':'True','RealReboot':'False','DebugBrokenScripts':'False','TerminalTimeout':'2147483647'}}.items():
+  for section,items in {'Files':{'LogDir':str(job/'native-logs')},'Distro':{'RemoveObsoletes':'False'},'View':{'View':'DistUpgradeViewUbuntuGlobal'},'NonInteractive':{'ForceOverwrite':'True','RealReboot':'False','DebugBrokenScripts':'False','TerminalTimeout':'2147483647'}}.items():
    if not parser.has_section(section):parser.add_section(section)
    for key,value in items.items():parser.set(section,key,value)
   with config.open('w') as stream:parser.write(stream);stream.flush();os.fsync(stream.fileno())
@@ -299,7 +299,7 @@ def worker(job):
   try:os.write(fd,canonical(value)+b'\n');os.fsync(fd)
   finally:os.close(fd)
  marker=install_frontend(decision,proof,event)
- sys.argv=[str(data/'dist-upgrade.py'),'--frontend','DistUpgradeViewVisionLineGlobal','--disable-gnu-screen','--have-prerequists','--with-network','--datadir',str(data)]
+ sys.argv=[str(data/'dist-upgrade.py'),'--frontend','DistUpgradeViewUbuntuGlobal','--disable-gnu-screen','--have-prerequists','--with-network','--datadir',str(data)]
  main=importlib.import_module('DistUpgrade.DistUpgradeMain')
  try:
   try:result=main.main()

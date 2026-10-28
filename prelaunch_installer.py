@@ -6,9 +6,10 @@ job state, units, unknown files or code changes refuse refresh.
 """
 import fcntl,hashlib,json,os,re,stat,subprocess,tempfile
 from pathlib import Path
+import updater_layout as layout
 
-WRAPPER=b'#!/bin/bash\nset -euo pipefail\nexec /usr/bin/python3 -B /var/lib/visionline-global-updater/payload/ubuntu_global.py "$@"\n'
-UNIT='visionline-global-updater.service'
+WRAPPER=layout.wrapper()
+UNIT=layout.GENERIC_UNIT
 class InstallError(Exception):pass
 def require(value,code):
     if not value:raise InstallError(code)
@@ -32,13 +33,15 @@ def directory(path,uid,create=False):
     info=path.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid==uid and stat.S_IMODE(info.st_mode)==0o700
             and path.resolve()==path,'unsafe_updater_directory')
-def native_unit_state():
-    result=subprocess.run(['/bin/systemctl','show',UNIT,'-p','LoadState','-p','ActiveState','-p','MainPID'],
+def native_unit_state(unit=UNIT):
+    result=subprocess.run(['/bin/systemctl','show',unit,'-p','LoadState','-p','ActiveState','-p','MainPID'],
                           stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10)
     values=dict(line.split('=',1) for line in result.stdout.decode().splitlines() if '=' in line)
     return values
 def no_running_payload(base,wrapper,uid):
     core=os.fsencode(str(base/'payload'/'ubuntu_global.py'));wrapper=os.fsencode(str(wrapper))
+    all_cores={core,os.fsencode(str(Path(layout.GENERIC_BASE)/'payload/ubuntu_global.py')),
+               os.fsencode(str(Path(layout.LEGACY_BASE)/'payload/ubuntu_global.py'))}
     for path in Path('/proc').iterdir():
         if not path.name.isdecimal() or int(path.name)==os.getpid():continue
         try:
@@ -48,11 +51,11 @@ def no_running_payload(base,wrapper,uid):
             args=raw.split(b'\0')
             applying=b'--apply' in args or b'--worker' in args
             module=any(args[i:i+2]==[b'-m',b'ubuntu_global'] for i in range(len(args)-1))
-            matched=core in args or wrapper in args
+            matched=any(value in args for value in all_cores) or wrapper in args
             if applying and not matched:
                 # A prior launcher may use ./ubuntu_global.py from payload cwd.
                 # Resolve candidate paths without printing process arguments.
-                targets={os.path.realpath(core),os.path.realpath(wrapper)}
+                targets={os.path.realpath(value) for value in all_cores}|{os.path.realpath(wrapper)}
                 cwd=None
                 for arg in args:
                     if not arg or arg.startswith(b'-'):continue
@@ -72,6 +75,14 @@ def wrapper_parent(wrapper,uid):
             and parent.resolve()==parent,'unsafe_wrapper_parent')
 
 def no_job(base,unit_paths,system_reader,wrapper,uid):
+    if str(base) in (layout.GENERIC_BASE,layout.LEGACY_BASE):
+        require(layout.installer_layout()['base']==str(base),'updater_namespace_conflict')
+        selected=layout.layout(str(base))
+        for unit in (layout.GENERIC_UNIT,layout.LEGACY_UNIT):
+            if unit==selected['unit']:continue
+            other=native_unit_state(unit)
+            require(other.get('LoadState')=='not-found' and other.get('ActiveState') in ('inactive','failed')
+                    and other.get('MainPID')=='0','opposite_updater_unit_loaded_or_unknown')
     require(not exists(base/'state.json'),'existing_job_preserved_use_status')
     require(not exists(base/'worker.lock'),'prior_worker_marker_requires_review')
     require(all(not exists(path) for path in unit_paths),'existing_unit_preserved_use_status')
@@ -101,13 +112,16 @@ def write_new(path,data,mode=0o600):
     with os.fdopen(fd,'wb') as stream:
         stream.write(data);stream.flush();os.fsync(stream.fileno())
 
-def install_bundle(files,allowed_payloads,base=Path('/var/lib/visionline-global-updater'),
+def install_bundle(files,allowed_payloads,base=None,
                    wrapper=Path('/root/ubuntu-global-updater.sh'),
-                   unit_paths=(Path('/etc/systemd/system')/UNIT,Path('/run/systemd/system')/UNIT),
-                   system_reader=native_unit_state,start=True,owner_uid=None):
+                   unit_paths=None,system_reader=None,start=True,owner_uid=None):
     uid=os.geteuid() if owner_uid is None else owner_uid
     require(not start or uid==os.geteuid()==0,'root_required')
-    base,wrapper=Path(base),Path(wrapper)
+    selected=layout.installer_layout() if base is None else layout.layout(str(base)) if str(base) in (layout.GENERIC_BASE,layout.LEGACY_BASE) else layout.layout()
+    base,wrapper=Path(selected['base'] if base is None else base),Path(wrapper)
+    wrapper_bytes=layout.wrapper(str(base)) if str(base) in (layout.GENERIC_BASE,layout.LEGACY_BASE) else WRAPPER
+    if unit_paths is None:unit_paths=(Path('/etc/systemd/system')/selected['unit'],Path('/run/systemd/system')/selected['unit'])
+    if system_reader is None:system_reader=lambda:native_unit_state(selected['unit'])
     require(base.is_absolute() and wrapper.is_absolute(),'absolute_installation_paths_required')
     require(files and 'ubuntu_global.py' in files and all(re.fullmatch(r'[a-z][a-z0-9_]*\.py',n) and isinstance(raw,bytes)
             and len(raw)<=2097152 for n,raw in files.items()),'invalid_installation_payload')
@@ -121,7 +135,7 @@ def install_bundle(files,allowed_payloads,base=Path('/var/lib/visionline-global-
         wrapper_parent(wrapper,uid)
         if exists(wrapper):
             require(stat.S_IMODE(wrapper.lstat().st_mode)==0o700,'existing_wrapper_permissions_not_700')
-            require(safe_file(wrapper,uid)==WRAPPER,'existing_wrapper_not_recognized')
+            require(safe_file(wrapper,uid)==wrapper_bytes,'existing_wrapper_not_recognized')
         payload=base/'payload';new_hashes={n:digest(raw) for n,raw in files.items()}
         old_hashes=inspect_payload(payload,list(allowed_payloads)+[new_hashes],uid) if exists(payload) else None
         archive=None
@@ -137,9 +151,9 @@ def install_bundle(files,allowed_payloads,base=Path('/var/lib/visionline-global-
                 sync_directory(archive)
             else:require(not exists(payload),'payload_appeared_during_install')
             os.rename(str(staged),str(payload));sync_directory(base)
-        if not exists(wrapper):write_new(wrapper,WRAPPER,0o700);sync_directory(wrapper.parent)
+        if not exists(wrapper):write_new(wrapper,wrapper_bytes,0o700);sync_directory(wrapper.parent)
         no_job(base,unit_paths,system_reader,wrapper,uid)
-        result=dict(status='prelaunch-payload-ready',version='2.0.2',previous_payload_archived=archive.name if archive else None,
+        result=dict(status='prelaunch-payload-ready',version='2.1.0',previous_payload_archived=archive.name if archive else None,
                     source_sha256=new_hashes,application_configuration_changes=0,job_state_changes=0)
         record_fd,record=tempfile.mkstemp(prefix='installation-',suffix='.json',dir=str(base))
         with os.fdopen(record_fd,'wb') as stream:
@@ -148,8 +162,8 @@ def install_bundle(files,allowed_payloads,base=Path('/var/lib/visionline-global-
         if start:
             # Retain admission lock through the foreground preflight/launch.
             os.set_inheritable(lockfd,True)
-            os.execve('/bin/bash',['/bin/bash',str(wrapper),'--apply'],
-                      dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C',
-                           VISIONLINE_INSTALLER_FD=str(lockfd)))
+            environment=dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C')
+            environment[selected['envkey']]=str(lockfd)
+            os.execve('/bin/bash',['/bin/bash',str(wrapper),'--apply'],environment)
         return result
     finally:os.close(lockfd)
