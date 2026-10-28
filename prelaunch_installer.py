@@ -188,7 +188,7 @@ def install_bundle(files,allowed_payloads,base=None,
             os.rename(str(staged),str(payload));sync_directory(base)
         if not exists(wrapper):write_new(wrapper,wrapper_bytes,0o700);sync_directory(wrapper.parent)
         no_job(base,unit_paths,system_reader,wrapper,uid)
-        result=dict(status='prelaunch-payload-ready',version='2.2.0',previous_payload_archived=archive.name if archive else None,
+        result=dict(status='prelaunch-payload-ready',version='2.2.1',previous_payload_archived=archive.name if archive else None,
                     source_sha256=new_hashes,application_configuration_changes=0,job_state_changes=0)
         if recovery:result['preflight_recovery']=recovery;result['job_state_changes']='exact_preflight_archived_with_evidence'
         record_fd,record=tempfile.mkstemp(prefix='installation-',suffix='.json',dir=str(base))

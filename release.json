@@ -20,23 +20,13 @@
   "WSL_restart": "manual distro restart; instance receipt; never host shutdown",
   "company_or_cloud_identity_required": false,
   "failed_preflight_recovery": "explicit exact v2.1.1 Apache preflight only; all evidence archived",
-  "live_OS_upgrade_tested": false,
-  "live_application_migration_tested": false,
-  "local_job_schema": 2,
-  "platforms": [
-    "native",
-    "systemd-enabled-WSL1",
-    "systemd-enabled-WSL2"
-  ],
-  "review_date": "2026-10-28",
-  "schema": 2,
-  "source_sha256": {
-    "README.md": "b8b677f5e2f1a9c87469872e6f14ccb43e0b888d9e25cfe367c18ba4de766c76",
+  "hotfix": "bounded read-only lifecycle-incomplete PHP runtime rechecks",
+  "hotfix_live_package_reload_cycle_tested": false,
+  "known_prelaunch_v220_sha256": {
     "apache_php_profile.py": "8a31d6f5d6a1929a6e2c3762728880839362ea4b1f17cc674f924eadf1a0a464",
     "fpm_pool_parser.py": "f2bcd43183791c1f1cb2b4affc17a232ee2184494b16fb9a441f824f36bca00a",
     "health_policy.py": "9b10d5485721305f27b25cb395a99cd03ff036dcc80860acca33b5696832c76b",
     "host_identity.py": "5186a627fd27971c29991b47a2a5739b53a0310934a43e08d01b85a208cb342d",
-    "install.sh": "8e7591c10f32fe7b26c20d68ee9e8203b961dbd452c3a3ce06c0c0bb104b9f88",
     "php_legacy_packages.py": "5a081fc018b709b98717d9226d91c2f7971d58ea0ad5480ebb1dd8fdb47abadb",
     "php_legacy_routing.py": "a92b5cf952f77def23e32adfbac5aea540635b2eddd2872ebbdce4dec8e93e79",
     "php_legacy_runner.py": "aec8e2599a45307b32422565a026c42e7f9d04da825d0c3727ba0bbe2c17946e",
@@ -53,8 +43,44 @@
     "unattended_handoff_v7.py": "caf30e5d501747dabdcb04947e28b93cb521006b24476c49c78edef043c1e6ca",
     "updater_layout.py": "fb5721081367b76113ea1f4db3460b2961f83c3e932578ad1ac51f0e77417f88",
     "updater_platform.py": "21bdea215aefdef9e54a9d3000533b3abdb7ed2554ac3174f81b3245a33c268a",
+    "upgrade_state_guard_v10_1.py": "e30ba445cb7fe2a4bc7fd7d8a5da705de5b0794364123df0914a44475694cb06"
+  },
+  "live_OS_upgrade_tested": false,
+  "live_application_migration_tested": false,
+  "local_job_schema": 2,
+  "platforms": [
+    "native",
+    "systemd-enabled-WSL1",
+    "systemd-enabled-WSL2"
+  ],
+  "prior_release": "2.2.0",
+  "review_date": "2026-10-28",
+  "schema": 2,
+  "source_sha256": {
+    "README.md": "caf128b729d3a2db3896baee751ce1316cb33206037b9c27f8b887e3a0a030c0",
+    "apache_php_profile.py": "fd24663b6cb4c046dfef9420b80f2ff8646df5b962b1404eb5b0fd741c2ece07",
+    "fpm_pool_parser.py": "f2bcd43183791c1f1cb2b4affc17a232ee2184494b16fb9a441f824f36bca00a",
+    "health_policy.py": "9b10d5485721305f27b25cb395a99cd03ff036dcc80860acca33b5696832c76b",
+    "host_identity.py": "5186a627fd27971c29991b47a2a5739b53a0310934a43e08d01b85a208cb342d",
+    "install.sh": "df57ca8ea36a5a016ccf1c5a1d5f08a50039858bc657bb3f581c4d88c459467e",
+    "php_legacy_packages.py": "5a081fc018b709b98717d9226d91c2f7971d58ea0ad5480ebb1dd8fdb47abadb",
+    "php_legacy_routing.py": "a92b5cf952f77def23e32adfbac5aea540635b2eddd2872ebbdce4dec8e93e79",
+    "php_legacy_runner.py": "aec8e2599a45307b32422565a026c42e7f9d04da825d0c3727ba0bbe2c17946e",
+    "php_repository.py": "6e79c0c310eb4e43857fd447f24b92dcf0104f3392b4ff0fcbcfae03d937a076",
+    "preflight_recovery.py": "bc9264cca4bc6277a1686d4b0580a7215fdce87a7310e32320b716183138b608",
+    "prelaunch_installer.py": "f8b61a15f860ea0b39639f0678870a0de2b337bc1eade0b51f05fede9b03f372",
+    "ubuntu_global.py": "5de998c17356339a71c85bf96b1a282cec3cea627c1c37b2bc64da61716be71c",
+    "ubuntu_global_early.py": "67872bb704097189b413a853a942e9cb98599127b692e1c65d2378349c26b3ca",
+    "ubuntu_global_guard.py": "6e03904bc5c31f622214828c623200036117a7e425a4083f7dbdd895abffc9bc",
+    "ubuntu_global_handoff.py": "dc0886dfe15bce3d36e7d2fb193ec763754ebb630f0f59b1047e25266ddf2bae",
+    "ubuntu_global_os.py": "9e9dfd0edfdd0beff94acbb8f2b0c445f693fed0c9d0dc76b6b8a3c8923d53bb",
+    "ubuntu_global_runtime.py": "198b82d97df6c6c465b8a5841745877476a9bbb192940ee18a57125d5ab2a3a3",
+    "ubuntu_global_support.py": "d7c6ad7674e620f1ab84a40287be162706810abcf940aa418cb4e1df96d5f402",
+    "unattended_handoff_v7.py": "caf30e5d501747dabdcb04947e28b93cb521006b24476c49c78edef043c1e6ca",
+    "updater_layout.py": "fb5721081367b76113ea1f4db3460b2961f83c3e932578ad1ac51f0e77417f88",
+    "updater_platform.py": "21bdea215aefdef9e54a9d3000533b3abdb7ed2554ac3174f81b3245a33c268a",
     "upgrade_state_guard_v10_1.py": "e30ba445cb7fe2a4bc7fd7d8a5da705de5b0794364123df0914a44475694cb06",
     "verify_release.py": "e682040cbb5663ba0b1ed064e9f6610363e9f2c1e9c81b045d64e6a46ebbbb3f"
   },
-  "version": "2.2.0"
+  "version": "2.2.1"
 }

@@ -63,6 +63,9 @@ def need(value, code):
 def error_code(error):
     known = (UpdateError, guard.PolicyError, unattended.HandoffError, os_upgrade.OSHold, early.EarlyError,
              layout.LayoutError, host_id.IdentityError, health_policy.HealthPolicyError, platform_api.PlatformError, php_repository.RepositoryError)
+    apache = sys.modules.get('apache_php_profile')
+    if apache is not None and isinstance(error, apache.ApacheProfileError):
+        return str(error)
     return str(error) if isinstance(error, known) else type(error).__name__
 
 def digest(data):
@@ -175,11 +178,53 @@ def health_baseline():
                     apache_profile_plan=plan)
     return early.health_baseline()
 
+def apache_readonly_observation(observe, label):
+    """Bounded re-observation only for proven process-lifecycle incompleteness.
+
+    The callback performs discovery/verification only. No package, reload or
+    restart command belongs inside this loop. Every attempt is recorded before
+    acceptance or a hold; incomplete observations can never authorize restart.
+    """
+    need(re.fullmatch(r'[a-z][a-z-]{0,40}', label) is not None, 'invalid_Apache_observation_label')
+    deadline = time.monotonic() + 30
+    for attempt in range(1, 4):
+        need(time.monotonic() < deadline, 'Apache_readonly_observation_deadline_expired')
+        path = BASE / ('apache-observation-' + label + '-' + unique_stamp() + '.json')
+        try:
+            result = observe(deadline)
+        except Exception as error:
+            write_json(path, dict(schema=1, label=label, attempt=attempt,
+                       error=error_code(error), readonly_observation=True))
+            raise
+        pending = result.get('runtime_snapshot_incomplete') is True
+        write_json(path, dict(schema=1, label=label, attempt=attempt,
+                   readonly_observation=True, result=result))
+        emit('Apache-observation', 'incomplete' if pending else 'captured',
+             attempt=attempt, private_evidence=path.name,
+             failed_checks=result.get('failed_checks', []))
+        need(time.monotonic() <= deadline, 'Apache_readonly_observation_deadline_expired')
+        if not pending:
+            return result
+        need(result.get('readonly_resample_eligible') is True,
+             'Apache_incomplete_snapshot_with_permanent_failure')
+        need(attempt < 3, 'Apache_runtime_inventory_incomplete_after_three_readonly_observations')
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    raise UpdateError('Apache_runtime_inventory_incomplete')
+
+def apache_observation_backend(deadline):
+    import apache_php_profile as apache
+    backend = apache.NativeBackend()
+    if hasattr(backend, 'deadline'):
+        backend.deadline = deadline
+    return backend
+
 def apache_profile_preflight():
     import apache_php_profile as apache
     if not apache.configured():
         return None
-    plan = apache.prepare_plan(apache.discover(apache.NativeBackend()))
+    profile = apache_readonly_observation(
+        lambda deadline: apache.discover(apache_observation_backend(deadline)), 'baseline')
+    plan = apache.prepare_plan(profile)
     need(run(['/bin/systemctl', 'is-active', 'nginx'], check=False).strip() != 'active',
          'Apache_and_active_Nginx_require_combined_verification_profile')
     installed = {guard.php_branch(name) for name in packages() if guard.php_branch(name)}
@@ -474,8 +519,9 @@ def php_stage():
              'initial_Apache_profile_missing_or_topology_changed')
         security = apache.authenticated_installed(pkg.Backend(), apache_plan['baseline'])
         if apache_plan['baseline']['runtime'].get('apache_active'):
-            initial = apache.verify(apache.NativeBackend(), saved,
-                                    expected_packages=security['expected_packages'])
+            initial = apache_readonly_observation(lambda deadline: apache.verify(
+                apache_observation_backend(deadline), saved,
+                expected_packages=security['expected_packages']), 'before-reload')
             pending = {'live_PHP_code_and_extensions_current', 'Apache_executables_current',
                        'runtime_extension_coverage_preserved', 'PHP_API_directory_preserved'}
             need(all(value for key, value in initial['checks'].items() if key not in pending),
@@ -495,8 +541,9 @@ def php_stage():
             run(['/bin/systemctl', 'reload', 'apache2.service'])
             deadline = time.monotonic() + 30
             while True:
-                result = apache.verify(apache.NativeBackend(), saved,
-                                       expected_packages=security['expected_packages'])
+                result = apache_readonly_observation(lambda observation_deadline: apache.verify(
+                    apache_observation_backend(observation_deadline), saved,
+                    expected_packages=security['expected_packages']), 'after-reload')
                 if result['status'] == 'apache_php_patch_verified':
                     break
                 checks = result['checks']
@@ -520,8 +567,9 @@ def php_stage():
                         else:
                             run(['/usr/sbin/apache2ctl', '-t'])
                         run(['/bin/systemctl', 'restart', unit])
-                    result = apache.verify(apache.NativeBackend(), saved,
-                                           expected_packages=security['expected_packages'])
+                    result = apache_readonly_observation(lambda deadline: apache.verify(
+                        apache_observation_backend(deadline), saved,
+                        expected_packages=security['expected_packages']), 'after-restart')
                     need(result['status'] == 'apache_php_patch_verified',
                          'Apache_old_workers_or_modules_remain_after_controlled_restart')
                     result['controlled_native_service_restarts'] = stale_units
@@ -530,8 +578,9 @@ def php_stage():
                     break
                 time.sleep(1)
         else:
-            result = apache.verify(apache.NativeBackend(), saved,
-                                   expected_packages=security['expected_packages'])
+            result = apache_readonly_observation(lambda deadline: apache.verify(
+                apache_observation_backend(deadline), saved,
+                expected_packages=security['expected_packages']), 'inactive')
             need(result['status'] == 'apache_php_configured_patch_verified_inactive_runtime_not_claimed',
                  'inactive_Apache_configuration_verification_failed')
         result['authenticated_packages'] = security

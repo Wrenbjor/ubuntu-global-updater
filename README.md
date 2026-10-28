@@ -1,4 +1,4 @@
-# Ubuntu global updater v2.2.0
+# Ubuntu global updater v2.2.1
 
 One host-local installer for supported Ubuntu systems across companies and hosting providers: **finish the OS upgrade to
 24.04 first, then migrate legacy PHP to a patched supported PHP8 branch.**
@@ -47,6 +47,18 @@ architecture, bootloader, repository, database and application-layout checks sti
 apply. Unknown providers' repositories require an explicit reviewed source profile;
 they are not enabled or rewritten speculatively. Current supported architecture is
 amd64. Standard Apache same-branch patch profiles are supported; custom/container/application profiles retain compatibility limits.
+
+## Graceful PHP reload verification hotfix (v2.2.1)
+
+A PHP worker can exit while its executable and module mappings are being read.
+Such a lifecycle-incomplete snapshot is inconclusive: it is not accepted as a
+patched runtime or treated as proof of stale code. Verification makes bounded,
+read-only rechecks and retains structured evidence. Persistent incomplete,
+unknown or stale mappings still stop the updater. These checks never retry a
+package transaction, send another reload, kill a PHP worker or resume a failed
+job. All platform, Apache, repository, application and recovery limits below
+continue to apply. The hotfix was fixture-tested; a live package/reload cycle is
+not claimed by these release artifacts.
 
 ## WSL and native platform detection
 

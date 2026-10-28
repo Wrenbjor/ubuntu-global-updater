@@ -1,77 +1,67 @@
 {
-  "actual_python36_isolated_bootstrap": {
-    "installer_sha256": "8e7591c10f32fe7b26c20d68ee9e8203b961dbd452c3a3ce06c0c0bb104b9f88",
+  "checks": [
+    "Transient inventory status requires confirmed process disappearance, exiting state, or changed start/executable identity; stable missing mappings and branch/API mismatch remain holds.",
+    "Unsafe permissions, unowned executables/modules and previously observed validation errors remain fatal even alongside lifecycle evidence.",
+    "Incomplete inventories cannot produce successful acceptance or authorize service restart. Baseline preparation also rejects incomplete inventory.",
+    "Core resampling is read-only, bounded to three attempts and thirty seconds, propagates the absolute deadline to native observation commands, and records each result or exception privately.",
+    "Complete configuration, package, health, ownership and runtime acceptance remains required; the resampling path contains no package, reload or restart commands.",
+    "Earlier baseline and same-SAPI/service-specific activation checks remain in place. No Node bootstrap, failed-job reset, or private recovery was added by this review."
+  ],
+  "independent_execution": {
+    "fixture_counts": {
+      "test_apache_core_integration_private.py": 11,
+      "test_apache_php_profile_private.py": 11,
+      "test_apache_readonly_resample_v221_private.py": 8,
+      "test_apache_runtime_lifecycle_private.py": 9
+    },
+    "fixture_sha256": {
+      "test_apache_core_integration_private.py": "4d82de95f551df5e2f4f0f646e2aaf27b8f62982980aef5aa3857f1d03863b9e",
+      "test_apache_php_profile_private.py": "433ba29bb1b310898ac16ce770121a45744806ed09f0e55ff95016edff1e35a7",
+      "test_apache_readonly_resample_v221_private.py": "12451cb7c56044192e730dcdc244314feaf4d40c5d9631ee3d251574075ebed4",
+      "test_apache_runtime_lifecycle_private.py": "d1909a6fb1e5ae3d05e7dfdd4b1d34cabfdbcaedcc55711ee8eb0c7c17699683"
+    },
+    "fixture_tests": 39,
+    "release_verifier": "passed; hashing, compilation and shell syntax only"
+  },
+  "installer_sha256": "df57ca8ea36a5a016ccf1c5a1d5f08a50039858bc657bb3f581c4d88c459467e",
+  "limitations": [
+    "The historical local verification failure was not conclusively reproduced; this change addresses a demonstrated lifecycle-inventory weakness, not a proven retrospective diagnosis.",
+    "No live distribution upgrade, WSL instance restart, PHP major migration, production connection, or publication was performed by this reviewer.",
+    "Actual Python3.6 bootstrap validation was performed by the parent agent and is not claimed as independently executed for this release.",
+    "Any private failed-job postcondition certification is outside this release receipt and requires separate review."
+  ],
+  "live_hotfix_package_cycle_tested": false,
+  "parent_actual_python36_bootstrap": {
+    "installer_sha256": "df57ca8ea36a5a016ccf1c5a1d5f08a50039858bc657bb3f581c4d88c459467e",
     "modules": 21,
     "package_actions": 0,
     "service_actions": 0,
     "status": "PASS"
   },
-  "additional_independent_recovery_source_review": {
-    "code_executed": false,
-    "scope": "Separate platform reviewer inspected recovery eligibility, locks, evidence, timers and unit cleanup",
-    "unresolved_findings": []
+  "parent_validation": {
+    "errors": 0,
+    "failures": 0,
+    "independently_rerun_in_full": false,
+    "skipped": 0,
+    "tests": 353
   },
-  "checks": [
-    "Existing signed PHP source alignment is restricted to the exact known repository and safe options; unrelated suites are preserved.",
-    "WSL planning omits automatic host restart and GRUB/running-Ubuntu-kernel assumptions; instance proof is separate from shared kernel boot identity.",
-    "Apache patch acceptance retains SAPI, MPM, configuration, routes, authenticated exact package rows, runtime mappings, API and extension coverage; FPM activation targets the exact branch service and restart requires observed service-specific stale mappings.",
-    "Mixed active web servers, uncovered PHP branches and legacy Apache major migrations hold for explicit compatibility review.",
-    "Explicit recovery recognizes only the full immutable earlier payload and exact idle Apache preflight failure on the same host; evidence is archived privately.",
-    "Installer admission, worker and shared-lock checks preserve active jobs; shared locks cover payload refresh and prior timer states must match exactly."
-  ],
-  "independent_execution": {
-    "actual_python36_proof_sha256": "e49ec08933966f96cc9343e6aae8dd770b3863be4c95e56215dfcf9528b81a1e",
-    "actual_python36_recovery_fixtures": 12,
-    "fixture_sha256": {
-      "test_global_v220_independent.py": "d859d22c5d8aef1f27890cf35f524d95fba786184ad03a4efd8dab451f648676",
-      "test_preflight_recovery_private.py": "6f0f2ddcba21e830f3e18b38004f2b7ddd8b456b2a3b2455c037bdc61efaf489"
-    },
-    "independently_rerun_other_author_apache_fixtures": 21,
-    "independently_rerun_other_author_repository_fixtures": 11,
-    "platform_fixtures": 4,
-    "recovery_and_installer_fixtures": 12,
-    "release_verifier": "passed; no installer execution"
-  },
-  "installer_sha256": "8e7591c10f32fe7b26c20d68ee9e8203b961dbd452c3a3ce06c0c0bb104b9f88",
-  "limitations": [
-    "No live distribution upgrade or WSL instance restart was performed by this reviewer.",
-    "No production connection or publication was performed by this reviewer.",
-    "Legacy Apache PHP major migration remains a nonexecuting compatibility plan.",
-    "The separately authorized local package transaction was source-reviewed; its execution and final local verification were performed and reported by the parent agent.",
-    "Full regression statistics, if present in validation.json, were produced by the parent validation runner."
-  ],
-  "parent_local_acceptance": {
-    "HTTP_baseline_preserved": true,
-    "OS_release_upgrade_performed": false,
-    "Ubuntu_package_suite": "noble",
-    "Windows_or_WSL_shutdown_requested": false,
-    "added_packages": 0,
-    "branch": "8.3",
-    "configuration_preserved": true,
-    "handler_and_MPM_preserved": true,
-    "installed_packages_updated": 7,
-    "live_mappings_current": true,
-    "production_connections": 0,
-    "removed_packages": 0,
-    "scope": "Authorized local WSL same-branch Apache PHP package realignment"
-  },
-  "release_sha256": "2b29747c665bfbf1bffa16f256a47f8246371514dc2176f18e9bdcf858ba72f3",
-  "review_scope": "Independent targeted local source review and private fixtures; recovery module implementation and its fixtures were authored by this reviewer.",
+  "release_sha256": "61019d5d364315e294669bb29fc7f06a514c13c346947a6075b8ca31f842f74b",
+  "review_scope": "Independent targeted source review and independent execution of fixtures authored by other agents. No updater execution by this reviewer.",
   "schema": 1,
   "source_sha256": {
-    "README.md": "b8b677f5e2f1a9c87469872e6f14ccb43e0b888d9e25cfe367c18ba4de766c76",
-    "apache_php_profile.py": "8a31d6f5d6a1929a6e2c3762728880839362ea4b1f17cc674f924eadf1a0a464",
+    "README.md": "caf128b729d3a2db3896baee751ce1316cb33206037b9c27f8b887e3a0a030c0",
+    "apache_php_profile.py": "fd24663b6cb4c046dfef9420b80f2ff8646df5b962b1404eb5b0fd741c2ece07",
     "fpm_pool_parser.py": "f2bcd43183791c1f1cb2b4affc17a232ee2184494b16fb9a441f824f36bca00a",
     "health_policy.py": "9b10d5485721305f27b25cb395a99cd03ff036dcc80860acca33b5696832c76b",
     "host_identity.py": "5186a627fd27971c29991b47a2a5739b53a0310934a43e08d01b85a208cb342d",
-    "install.sh": "8e7591c10f32fe7b26c20d68ee9e8203b961dbd452c3a3ce06c0c0bb104b9f88",
+    "install.sh": "df57ca8ea36a5a016ccf1c5a1d5f08a50039858bc657bb3f581c4d88c459467e",
     "php_legacy_packages.py": "5a081fc018b709b98717d9226d91c2f7971d58ea0ad5480ebb1dd8fdb47abadb",
     "php_legacy_routing.py": "a92b5cf952f77def23e32adfbac5aea540635b2eddd2872ebbdce4dec8e93e79",
     "php_legacy_runner.py": "aec8e2599a45307b32422565a026c42e7f9d04da825d0c3727ba0bbe2c17946e",
     "php_repository.py": "6e79c0c310eb4e43857fd447f24b92dcf0104f3392b4ff0fcbcfae03d937a076",
     "preflight_recovery.py": "bc9264cca4bc6277a1686d4b0580a7215fdce87a7310e32320b716183138b608",
-    "prelaunch_installer.py": "a5322baae0cdd1f937e3035ee2bea3c39430e436fa4777b48b847ef4c93c9700",
-    "ubuntu_global.py": "12048f9f18fb18acc19aa46d9b2030e238fc03f7eefb944e48f9966df0c56bf2",
+    "prelaunch_installer.py": "f8b61a15f860ea0b39639f0678870a0de2b337bc1eade0b51f05fede9b03f372",
+    "ubuntu_global.py": "5de998c17356339a71c85bf96b1a282cec3cea627c1c37b2bc64da61716be71c",
     "ubuntu_global_early.py": "67872bb704097189b413a853a942e9cb98599127b692e1c65d2378349c26b3ca",
     "ubuntu_global_guard.py": "6e03904bc5c31f622214828c623200036117a7e425a4083f7dbdd895abffc9bc",
     "ubuntu_global_handoff.py": "dc0886dfe15bce3d36e7d2fb193ec763754ebb630f0f59b1047e25266ddf2bae",
@@ -85,6 +75,6 @@
     "verify_release.py": "e682040cbb5663ba0b1ed064e9f6610363e9f2c1e9c81b045d64e6a46ebbbb3f"
   },
   "unresolved_findings": [],
-  "validation_sha256": "3dfd23cf4582f629254285cd31029b657ce6593be69a966598e5600acab4afa9",
-  "version": "2.2.0"
+  "validation_sha256": "4f01f0ea3feb0a3dcb53dc50b611bcf114961021914524d808766ab9435633d3",
+  "version": "2.2.1"
 }

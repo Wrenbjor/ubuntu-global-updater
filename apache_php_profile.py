@@ -5,11 +5,12 @@ retain the active SAPI and MPM. Major migrations require an explicit same-SAPI
 compatibility plan; this module never silently converts mod_php to FPM.
 Public results contain hashes/metadata, never configuration contents or INI values.
 """
-import glob,hashlib,json,os,re,shlex,stat,subprocess
+import glob,hashlib,json,os,re,shlex,stat,subprocess,time
 from pathlib import Path,PurePosixPath
 
 LEGACY={'7.2','7.3','7.4','8.0','8.1'}
 TARGETS={'8.2','8.3','8.4','8.5'}
+LIFECYCLE_REASONS={'identified_process_vanished','identified_process_exiting','process_identity_changed'}
 ENV=dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/nonexistent',LANG='C',LC_ALL='C')
 
 class ApacheProfileError(ValueError):pass
@@ -17,6 +18,37 @@ def need(value,code):
     if not value:raise ApacheProfileError(code)
 def sha(raw):return hashlib.sha256(raw).hexdigest()
 def encoded(value):return json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+
+def _lifecycle_incomplete(row):
+    if row.get('observation_incomplete') is not True:return False
+    reason=row.get('lifecycle_reason');evidence=row.get('lifecycle_evidence',{})
+    if reason not in LIFECYCLE_REASONS or not isinstance(evidence,dict):return False
+    if reason=='identified_process_vanished':return evidence.get('process_exists_after') is False
+    if reason=='identified_process_exiting':return evidence.get('state_after') in ('Z','X','x')
+    start=evidence.get('start_before');after=evidence.get('start_after')
+    executable=evidence.get('executable_before');new=evidence.get('executable_after')
+    return (isinstance(start,str) and start.isdecimal() and isinstance(after,str) and after.isdecimal() and start!=after) or (isinstance(executable,str) and isinstance(new,str) and executable!=new)
+
+def _runtime_inventory(runtime,sapi,branch):
+    errors=[];incomplete=[]
+    for kind in ('apache','fpm'):
+        for row in runtime.get(kind,[]):
+            for code in row.get('validation_errors',[]):errors.append(dict(kind=kind,pid=row.get('pid'),code=code))
+            if row.get('observation_incomplete'):
+                if _lifecycle_incomplete(row):
+                    incomplete.append(dict(kind=kind,pid=row.get('pid'),start_time_ticks=row.get('start_time_ticks'),reason=row['lifecycle_reason'],evidence=row['lifecycle_evidence']))
+                    continue
+                errors.append(dict(kind=kind,pid=row.get('pid'),code='invalid_lifecycle_evidence'))
+            stale=row.get('stale_executable_observed') is True or row.get('stale_maps_observed') is True
+            executable_current=row.get('executable_current',row.get('maps_current'))
+            if executable_current is not True and row.get('stale_executable_observed') is not True:errors.append(dict(kind=kind,pid=row.get('pid'),code='stable_executable_unverifiable'))
+            php=kind=='fpm' or sapi=='apache2handler'
+            if not php:continue
+            correct=row.get('branch')==branch if kind=='fpm' else row.get('php_branches')==[branch]
+            if not correct:errors.append(dict(kind=kind,pid=row.get('pid'),code='stable_PHP_branch_mismatch'))
+            if not row.get('api_directories'):errors.append(dict(kind=kind,pid=row.get('pid'),code='stable_PHP_API_mapping_missing'))
+            if row.get('maps_current') is not True and not stale:errors.append(dict(kind=kind,pid=row.get('pid'),code='stable_PHP_mapping_unverifiable'))
+    return incomplete,errors
 
 class ConfigReader:
     def __init__(self,root='/',owner_uid=0):
@@ -150,6 +182,7 @@ def _health_specs(vhosts,listeners,addresses):
     return list({tuple(sorted(s.items())):s for s in specs}.values())
 
 def discover(backend,current=None,root='/',owner_uid=0,capture_health=True):
+    if hasattr(backend,'_remaining'):backend._remaining()
     current=backend.snapshot() if current is None else current;reader=ConfigReader(root,owner_uid);graph=_graph(reader)
     limitations=list(graph['limitations']);loads=graph['loads']
     branches={m.group(1) for item in loads for m in [re.fullmatch(r'/usr/lib/apache2/modules/libphp([0-9]+\.[0-9]+)\.so',item['path'])] if m}
@@ -196,10 +229,11 @@ def discover(backend,current=None,root='/',owner_uid=0,capture_health=True):
         else:graph['vhosts'][handler['vhost']]['php']=True
     need(graph['handlers'],'Apache_PHP_handler_configuration_required')
     runtime=backend.runtime()
-    if sapi=='apache2handler' and any(row.get('php_branches')!=[branch] for row in runtime.get('apache',[])):
+    incomplete,runtime_errors=_runtime_inventory(runtime,sapi,branch)
+    if sapi=='apache2handler' and any(not _lifecycle_incomplete(row) and row.get('php_branches')!=[branch] for row in runtime.get('apache',[])):
         limitations.append('live_Apache_PHP_branch_differs_from_configured_branch_requires_compatibility_plan')
-    if any(row.get('branch')!=branch for row in runtime.get('fpm',[])):limitations.append('other_or_unverifiable_active_PHP_branch_requires_explicit_profile')
-    if sapi=='apache2handler' and runtime.get('fpm'):limitations.append('additional_active_FPM_runtime_requires_explicit_profile')
+    if any(not _lifecycle_incomplete(row) and row.get('branch')!=branch for row in runtime.get('fpm',[])):limitations.append('other_or_unverifiable_active_PHP_branch_requires_explicit_profile')
+    if sapi=='apache2handler' and any(not _lifecycle_incomplete(row) for row in runtime.get('fpm',[])):limitations.append('additional_active_FPM_runtime_requires_explicit_profile')
     all_specs=_health_specs(graph['vhosts'],graph['listeners'],set(backend.local_addresses()))
     import health_policy
     specs=health_policy.filter_specs(all_specs,root,owner_uid) if all_specs else []
@@ -207,12 +241,16 @@ def discover(backend,current=None,root='/',owner_uid=0,capture_health=True):
     if runtime.get('apache_active') and not all_specs:limitations.append('local_Apache_PHP_health_endpoint_missing')
     health=backend.health(specs) if capture_health and runtime.get('apache_active') and specs else []
     profile=dict(schema='ubuntu-apache-php-profile-v1',sapi=sapi,mpm=mpm,source_branch=branch,modules=modules,vhosts=graph['vhosts'],handlers=graph['handlers'],config_files=reader.files,aliases=reader.aliases,include_graph=graph['includes'],ini_graph=ini['patterns'],php_ini_keys=ini['keys'],php_override_keys=sorted({i['key'] for i in graph['overrides']}),health_specs=specs,health_policy=policy,health_baseline=health,runtime=runtime,limitations=sorted(set(limitations)),os=current['os'],package_rows={n:r for n,r in current['packages'].items() if re.match(r'^(?:php'+re.escape(branch)+r'(?:-|$)|libapache2-mod-php'+re.escape(branch)+r'$)',n)},native_evidence=dict(configtest_sha256=sha(configtest),module_map_sha256=sha(raw_modules),vhost_map_sha256=sha(raw_vhosts)))
+    profile.update(runtime_snapshot_incomplete=bool(incomplete),runtime_observations=incomplete,runtime_validation_errors=runtime_errors,readonly_resample_eligible=bool(incomplete) and not runtime_errors and not limitations)
+    if hasattr(backend,'_remaining'):backend._remaining()
     profile['profile_sha256']=sha(encoded(profile));return profile
 
 def prepare_plan(profile,target_branch=None):
     source=profile['source_branch'];target=target_branch or ('8.3' if source in LEGACY else source)
     need(target in TARGETS,'supported_PHP8_target_required')
     migration=source!=target;limitations=list(profile['limitations']);mapping={}
+    if profile.get('runtime_snapshot_incomplete'):limitations.append('incomplete_runtime_snapshot_requires_stable_preflight')
+    if profile.get('runtime_validation_errors'):limitations.append('runtime_validation_failed_requires_explicit_profile')
     for name in profile['package_rows']:
         if name=='libapache2-mod-php'+source:mapping[name]='libapache2-mod-php'+target
         elif name=='php'+source+'-json':mapping[name]='builtin:json' if migration else name
@@ -237,6 +275,9 @@ def verify(backend,plan,current=None,root='/',owner_uid=0,expected_packages=None
     rows=backend.snapshot()['packages'] if current is None else current['packages']
     checks['exact_expected_package_targets']=bool(expected_packages) and set(plan['required_targets'])<=set(expected_packages) and all(rows.get(n)==r for n,r in (expected_packages or {}).items())
     runtime=after['runtime'];active=runtime.get('apache_active') is True
+    checks['runtime_snapshot_complete']=not after['runtime_snapshot_incomplete']
+    runtime_errors=list(after['runtime_validation_errors'])
+    checks['stable_runtime_validation']=not runtime_errors
     checks['Apache_executables_current']=bool(runtime.get('apache')) and all(w.get('executable_current',w.get('maps_current')) is True for w in runtime.get('apache',[])) if active else True
     workers=runtime.get('apache',[]) if plan['sapi']=='apache2handler' else [r for r in runtime.get('fpm',[]) if r.get('branch')==target]
     checks['live_PHP_code_and_extensions_current']=bool(active and workers) and all(w.get('maps_current') is True and (w.get('php_branches')==[target] if plan['sapi']=='apache2handler' else w.get('branch')==target) and w.get('api_directories') for w in workers)
@@ -245,14 +286,22 @@ def verify(backend,plan,current=None,root='/',owner_uid=0,expected_packages=None
     checks['runtime_extension_coverage_preserved']=old_modules<=new_modules if active else not before['runtime'].get('apache_active')
     old_apis={p for w in (before['runtime'].get('apache',[]) if plan['sapi']=='apache2handler' else before['runtime'].get('fpm',[])) for p in w.get('api_directories',[])}
     checks['PHP_API_directory_preserved']=not active or (len(old_apis)==1 and all(set(w.get('api_directories',[]))==old_apis for w in workers))
+    if after['runtime_snapshot_incomplete']:
+        for worker in workers:
+            if _lifecycle_incomplete(worker):continue
+            if old_apis and set(worker.get('api_directories',[]))!=old_apis:runtime_errors.append(dict(pid=worker.get('pid'),code='stable_PHP_API_directory_changed'))
+            if worker.get('maps_current') is True and not old_modules<=set(worker.get('extension_modules',[])):runtime_errors.append(dict(pid=worker.get('pid'),code='stable_PHP_extension_coverage_missing'))
+    checks['stable_runtime_validation']=not runtime_errors
     acceptance={k:v for k,v in checks.items() if k!='live_PHP_code_and_extensions_current' or active}
     status='apache_php_patch_verified' if all(acceptance.values()) else 'apache_php_verification_failed_or_pending'
     if status=='apache_php_patch_verified' and not active:status='apache_php_configured_patch_verified_inactive_runtime_not_claimed'
-    observed=lambda rows:any(w.get('stale_maps_observed') is True or w.get('stale_executable_observed') is True for w in rows)
+    observed=lambda rows:any(not _lifecycle_incomplete(w) and (w.get('stale_maps_observed') is True or w.get('stale_executable_observed') is True) for w in rows)
     stale_services=[]
     if observed(runtime.get('apache',[])):stale_services.append('apache2.service')
     if plan['sapi']=='fpm-fcgi' and observed(workers):stale_services.append('php'+target+'-fpm.service')
-    return dict(status=status,checks=checks,stale_runtime_mapping_or_executable_observed=bool(stale_services),stale_services=stale_services,source_branch=plan['source_branch'],target_branch=target,sapi=plan['sapi'],mpm=plan['mpm'],profile_sha256=after['profile_sha256'],package_authentication_and_CVE_floor='caller_must_validate_signed_candidate_plan; this profile matches exact expected installed rows only',production_changes=0)
+    runtime_checks={'runtime_snapshot_complete','live_PHP_code_and_extensions_current','Apache_executables_current','runtime_extension_coverage_preserved','PHP_API_directory_preserved'}
+    eligible=after['readonly_resample_eligible'] and all(value for key,value in checks.items() if key not in runtime_checks)
+    return dict(status=status,checks=checks,failed_checks=sorted(key for key,value in checks.items() if not value),limitations=after['limitations'],runtime_snapshot_incomplete=after['runtime_snapshot_incomplete'],runtime_observations=after['runtime_observations'],runtime_validation_errors=runtime_errors,readonly_resample_eligible=bool(eligible),stale_runtime_mapping_or_executable_observed=bool(stale_services) and not after['runtime_snapshot_incomplete'],stale_services=stale_services,source_branch=plan['source_branch'],target_branch=target,sapi=plan['sapi'],mpm=plan['mpm'],profile_sha256=after['profile_sha256'],package_authentication_and_CVE_floor='caller_must_validate_signed_candidate_plan; this profile matches exact expected installed rows only',production_changes=0)
 
 def authenticated_installed(backend,profile):
     """Post-Noble read-only signed same-release/core-floor verification."""
@@ -276,6 +325,14 @@ def authenticated_installed(backend,profile):
 
 class NativeBackend:
     """Read-only commands. The caller supplies authenticated package planning."""
+    def __init__(self,deadline=None):
+        need(deadline is None or type(deadline) in (int,float),'invalid_Apache_observation_deadline');self.deadline=deadline
+    def _remaining(self):
+        deadline=getattr(self,'deadline',None)
+        if deadline is None:return 20
+        remaining=deadline-time.monotonic()
+        need(remaining>0,'Apache_readonly_observation_deadline_expired')
+        return min(20,remaining)
     def snapshot(self):
         release={}
         for line in Path('/etc/os-release').read_text().splitlines():
@@ -295,7 +352,10 @@ class NativeBackend:
         owner_query=len(args)==3 and args[:2]==['/usr/bin/dpkg-query','-S'] and re.fullmatch(r'/usr/(?:sbin/(?:apache2|php-fpm[0-9]+\.[0-9]+)|lib/apache2/modules/libphp[0-9]+\.[0-9]+\.so|lib/php/[0-9]{8}/[A-Za-z0-9_.-]+\.so)',args[2]) is not None
         allowed=(args[:1]==['/usr/sbin/apache2ctl'] and args[1:] in (['-t'],['-M'],['-S'])) or args==['/usr/sbin/ip','-j','address','show'] or package_query or owner_query or curl
         need(allowed,'mutating_or_unknown_Apache_backend_command_forbidden')
-        result=subprocess.run(args,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20,env=ENV)
+        try:result=subprocess.run(args,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=self._remaining(),env=ENV)
+        except subprocess.TimeoutExpired:
+            if getattr(self,'deadline',None) is not None:self._remaining()
+            raise ApacheProfileError('Apache_readonly_command_timeout')
         raw=result.stdout+(result.stderr if args[:1]==['/usr/sbin/apache2ctl'] else b'')
         need(len(raw)<=2097152,'Apache_native_output_too_large');return result.returncode,raw
     def local_addresses(self):
@@ -314,7 +374,32 @@ class NativeBackend:
         return results
     def runtime(self):
         apache=[];fpm=[];packages=self.snapshot()['packages'];owners={}
+        def identity(process):
+            self._remaining()
+            fields=(process/'stat').read_text().rsplit(')',1)[-1].split()
+            need(len(fields)>=20 and len(fields[0])==1 and fields[19].isdecimal(),'Apache_runtime_stat_malformed')
+            return fields[0],fields[19]
+        def transition(process,start,executable):
+            self._remaining()
+            evidence=dict(start_before=start,executable_before=executable)
+            try:
+                state,after=identity(process);evidence.update(state_after=state,start_after=after,process_exists_after=True)
+                if state in ('Z','X','x'):return dict(observation_incomplete=True,lifecycle_reason='identified_process_exiting',lifecycle_evidence=evidence)
+                new=os.readlink(process/'exe');evidence['executable_after']=new
+                if start is not None and after!=start or executable is not None and executable!=new:
+                    return dict(observation_incomplete=True,lifecycle_reason='process_identity_changed',lifecycle_evidence=evidence)
+            except (FileNotFoundError,ProcessLookupError):
+                if not process.exists():
+                    evidence['process_exists_after']=False
+                    return dict(observation_incomplete=True,lifecycle_reason='identified_process_vanished',lifecycle_evidence=evidence)
+                # An unavailable exe on an existing, non-exiting stable PID
+                # is not proof of a lifecycle race and is never retry-eligible.
+                state,after=identity(process);evidence.update(state_after=state,start_after=after,process_exists_after=True)
+                if state in ('Z','X','x'):return dict(observation_incomplete=True,lifecycle_reason='identified_process_exiting',lifecycle_evidence=evidence)
+                if start is not None and after!=start:return dict(observation_incomplete=True,lifecycle_reason='process_identity_changed',lifecycle_evidence=evidence)
+            return None
         def owned(path,branch=None):
+            self._remaining()
             if path not in owners:
                 code,raw=self.run(['/usr/bin/dpkg-query','-S',path]);names=[line.split(': ',1)[0].split(':',1)[0] for line in raw.decode().splitlines() if ': ' in line]
                 owners[path]=names if code==0 else []
@@ -322,22 +407,34 @@ class NativeBackend:
             expected='apache2-bin' if path=='/usr/sbin/apache2' else ('php'+branch+'-fpm' if path.startswith('/usr/sbin/') else 'libapache2-mod-php'+branch if '/apache2/modules/' in path else None)
             return len(names)==1 and names[0] in packages and packages[names[0]]['status']=='ii' and (names[0]==expected if expected else names[0].startswith('php'+branch+'-'))
         for process in Path('/proc').iterdir():
+            self._remaining()
             if not process.name.isdecimal():continue
-            kind=None;branch=None
+            kind=None;branch=None;start=None;executable=None;validation_errors=[]
             try:
                 comm=(process/'comm').read_text().strip()
                 if comm!='apache2' and not comm.startswith('php-fpm'):continue
                 kind='apache' if comm=='apache2' else 'fpm'
-                start=(process/'stat').read_text().rsplit(')',1)[1].split()[19]
+                state,start=identity(process)
+                if state in ('Z','X','x'):
+                    row=dict(pid=int(process.name),start_time_ticks=start,maps_current=False,executable_current=False,php_branches=[],api_directories=[],extension_modules=[],validation_errors=[])
+                    row.update(transition(process,start,None))
+                    if kind=='apache':apache.append(row)
+                    else:row['branch']=None;fpm.append(row)
+                    continue
                 executable=os.readlink(process/'exe');canonical=executable[:-10] if executable.endswith(' (deleted)') else executable
                 branch=re.fullmatch(r'/usr/sbin/php-fpm([0-9]+\.[0-9]+)',canonical)
                 if comm!='apache2' and branch is None:
-                    fpm.append(dict(pid=int(process.name),branch=None,maps_current=False,executable_current=False,php_branches=[],api_directories=[],extension_modules=[]));continue
+                    fpm.append(dict(pid=int(process.name),branch=None,maps_current=False,executable_current=False,php_branches=[],api_directories=[],extension_modules=[],validation_errors=['noncanonical_FPM_executable']));continue
                 expected='/usr/sbin/apache2' if comm=='apache2' else canonical
                 live=(process/'exe').stat();disk=Path(expected).stat()
                 same_inode=(live.st_dev,live.st_ino)==(disk.st_dev,disk.st_ino)
                 stale_executable=executable in (expected,expected+' (deleted)') and (not same_inode or executable.endswith(' (deleted)'))
-                executable_current=executable==expected and same_inode and stat.S_ISREG(disk.st_mode) and disk.st_uid==0 and not disk.st_mode&0o022 and owned(expected,branch.group(1) if branch else None)
+                safe_executable=stat.S_ISREG(disk.st_mode) and disk.st_uid==0 and not disk.st_mode&0o022
+                owned_executable=owned(expected,branch.group(1) if branch else None)
+                if executable not in (expected,expected+' (deleted)'):validation_errors.append('noncanonical_Apache_PHP_executable')
+                if not safe_executable:validation_errors.append('unsafe_Apache_PHP_executable_permissions')
+                if not owned_executable:validation_errors.append('unowned_Apache_PHP_executable')
+                executable_current=executable==expected and same_inode and safe_executable and owned_executable
                 paths=[];valid=bool(executable_current);stale_maps=False
                 for line in (process/'maps').read_text().splitlines():
                     fields=line.split(None,5)
@@ -349,18 +446,30 @@ class NativeBackend:
                     info=Path(path).stat();major,minor=fields[3].split(':')
                     same_map=(int(major,16),int(minor,16),int(fields[4]))==(os.major(info.st_dev),os.minor(info.st_dev),info.st_ino)
                     stale_maps=stale_maps or not same_map
-                    valid=valid and same_map and info.st_uid==0 and not info.st_mode&0o022
+                    safe_map=info.st_uid==0 and not info.st_mode&0o022
+                    if not safe_map:validation_errors.append('unsafe_PHP_mapping_permissions')
+                    valid=valid and same_map and safe_map
                 clean_paths=[p[:-10] if p.endswith(' (deleted)') else p for p in paths]
                 module_branches=sorted({m.group(1) for p in clean_paths for m in [re.fullmatch(r'/usr/lib/apache2/modules/libphp([0-9]+\.[0-9]+)\.so',p)] if m})
                 map_branch=branch.group(1) if branch else module_branches[0] if len(module_branches)==1 else None
-                valid=bool(valid and map_branch and all(owned(p,map_branch) for p in set(paths)))
-                need((process/'stat').read_text().rsplit(')',1)[1].split()[19]==start and os.readlink(process/'exe')==executable,'Apache_process_identity_changed_during_read')
-                row=dict(pid=int(process.name),start_time_ticks=start,executable=executable,executable_current=bool(executable_current),stale_executable_observed=bool(stale_executable),stale_maps_observed=bool(stale_maps),maps_current=bool(valid and paths),php_branches=module_branches,api_directories=sorted({m.group(1) for p in clean_paths for m in [re.match(r'(/usr/lib/php/[0-9]{8})/',p)] if m}),extension_modules=sorted({Path(p).name for p in clean_paths if re.match(r'/usr/lib/php/[0-9]{8}/[^/]+\.so$',p)}))
+                owned_maps=bool(map_branch)
+                if map_branch:
+                    for path in set(clean_paths):
+                        info=Path(path).stat()
+                        if info.st_uid!=0 or info.st_mode&0o022:validation_errors.append('unsafe_PHP_mapping_permissions')
+                        if not owned(path,map_branch):validation_errors.append('unowned_PHP_mapping');owned_maps=False
+                valid=bool(valid and owned_maps and not validation_errors)
+                row=dict(pid=int(process.name),start_time_ticks=start,executable=executable,executable_current=bool(executable_current),stale_executable_observed=bool(stale_executable),stale_maps_observed=bool(stale_maps),maps_current=bool(valid and paths),php_branches=module_branches,api_directories=sorted({m.group(1) for p in clean_paths for m in [re.match(r'(/usr/lib/php/[0-9]{8})/',p)] if m}),extension_modules=sorted({Path(p).name for p in clean_paths if re.match(r'/usr/lib/php/[0-9]{8}/[^/]+\.so$',p)}),validation_errors=sorted(set(validation_errors)))
+                change=transition(process,start,executable)
+                if change:row.update(change);row['maps_current']=False;row['executable_current']=False
                 if comm=='apache2':apache.append(row)
                 else:row['branch']=branch.group(1);fpm.append(row)
             except (FileNotFoundError,ProcessLookupError):
-                if kind and process.exists():
-                    row=dict(pid=int(process.name),maps_current=False,executable_current=False,php_branches=[],api_directories=[],extension_modules=[])
+                if kind:
+                    change=transition(process,start,executable)
+                    need(change is not None,'Apache_runtime_path_missing_without_lifecycle_evidence')
+                    row=dict(pid=int(process.name),start_time_ticks=start,maps_current=False,executable_current=False,php_branches=[],api_directories=[],extension_modules=[],validation_errors=sorted(set(validation_errors)))
+                    row.update(change)
                     if kind=='apache':apache.append(row)
                     else:row['branch']=branch.group(1) if branch else None;fpm.append(row)
             except PermissionError:raise ApacheProfileError('Apache_runtime_mapping_unreadable')
