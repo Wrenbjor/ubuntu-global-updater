@@ -35,6 +35,14 @@ canonical `.so` library must be root-safe and match installed package ownership
 and MD5 inventory; the admitted configuration contains only the module loader.
 This exception does not admit arbitrary external include or library paths.
 
+The standard Forge ACME exception is also recognized: a static
+`location /.well-known/acme-challenge` prefix, optionally with a trailing slash
+or `^~`, may use a literal absolute alias such as `/home/forge/.letsencrypt`.
+Only the explicit static directive allowlist is admitted. The alias bytes are
+preserved and its target is untouched. Traversal, variables, control characters,
+rewrites, nested locations and alternate routing or handlers still hold. Other
+aliases require a separate health profile; this is not general alias support.
+
 The installer contains its complete Python payload. It downloads no additional
 updater code or Python libraries at runtime. System Python 3.10 and the existing
 Ubuntu `python3-apt` package are required. Normal authenticated APT package
@@ -76,10 +84,11 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.2 has two narrowly defined automatic preflight recovery cases on the
+Version 1.0.3 has three narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
-`absolute_nginx_include_required` failure. Each must match its original core,
+`absolute_nginx_include_required` failure, plus the exact byte-pinned version
+1.0.2 `Nginx_alias_requires_separate_health_profile` failure. Each must match its original core,
 three-event preflight chain and timer evidence, with empty failure details and
 no recovery reference. Eligibility requires no sealed plan or package action
 and restored timer activity. Cached APT indexes may already have been refreshed;

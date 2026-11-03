@@ -20,9 +20,10 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.2'
+VERSION = '1.0.3'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
+PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
 BASE = Path('/var/lib/ubuntu-php85-upgrade')
 TARGET = '8.5'
 FLOOR = '8.5.12'
@@ -608,12 +609,49 @@ def nginx_include_pattern(argument, source):
     return normalized
 
 
+def validate_acme_alias(location):
+    """Recognize a static ACME location; never read or alter its alias target."""
+    reason = 'Nginx_alias_requires_separate_health_profile'
+    args = location['args']
+    if args and args[0] == '^~':
+        args = args[1:]
+    need(args in (['/.well-known/acme-challenge'], ['/.well-known/acme-challenge/']), reason)
+    statements = location['directives']
+    need(sum(name == 'alias' for name, _, _ in statements) == 1, reason)
+    for name, values, block in statements:
+        need(not block and all('$' not in value and not any(ord(c) < 32 or ord(c) == 127 for c in value)
+                               for value in values), reason)
+        if name == 'alias':
+            need(len(values) == 1 and values[0].startswith('/') and '..' not in values[0].split('/')
+                 and os.path.normpath(values[0]) != '/', reason)
+        elif name == 'include':
+            # The normal graph visitor validates and expands this static pattern.
+            need(len(values) == 1, reason)
+        elif name in ('allow', 'deny'):
+            need(len(values) == 1, reason)
+            if values[0] not in ('all', 'unix:'):
+                try:
+                    ipaddress.ip_network(values[0], strict=False)
+                except ValueError:
+                    raise Hold(reason)
+        elif name == 'auth_basic':
+            need(values == ['off'], reason)
+        elif name == 'default_type':
+            need(len(values) == 1 and re.fullmatch(r'[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+', values[0]), reason)
+        elif name in ('access_log', 'autoindex'):
+            need(values == ['off'], reason)
+        elif name == 'log_not_found':
+            need(values in (['on'], ['off']), reason)
+        else:
+            raise Hold(reason)
+
+
 def nginx_inventory(read=None, expand=None):
     read = read or (lambda path: safe_file(path).decode())
     expand = expand or (lambda value: sorted(glob.glob(value)))
-    seen, routes, servers = {}, [], []
+    seen, routes, servers, locations = {}, [], [], []
 
-    def walk(path, server=None, depth=0):
+    def walk(path, server=None, location=None, depth=0):
         need(depth <= 20 and len(seen) <= 500, 'nginx_include_limit')
         p = Path(path)
         validated = {}
@@ -628,18 +666,25 @@ def nginx_inventory(read=None, expand=None):
         if vendor_only:
             return
 
-        def visit(nodes, context):
+        def visit(nodes, context, location_context):
             for header, children in nodes:
                 name, args = header[0][0], [x[0] for x in header[1:]]
                 current = context
+                current_location = location_context
+                if location_context is not None:
+                    location_context['directives'].append((name, args, children is not None))
                 if name == 'server' and children is not None:
                     need(not args, 'non_HTTP_server_block')
                     current = dict(names=[], roots=[], listen=[], routes=[])
                     servers.append(current)
+                    current_location = None
+                elif name == 'location' and children is not None:
+                    current_location = dict(args=args, directives=[])
+                    locations.append(current_location)
                 if name == 'include':
                     need(len(args) == 1, 'single_nginx_include_argument_required')
                     for child in expand(nginx_include_pattern(args[0], str(p))):
-                        walk(child, current, depth + 1)
+                        walk(child, current, current_location, depth + 1)
                 elif name == 'fastcgi_pass':
                     need(current is not None and len(args) == 1 and args[0].startswith('unix:'), 'direct_Unix_FastCGI_required')
                     socket = normalize_socket(args[0][5:])
@@ -648,14 +693,18 @@ def nginx_inventory(read=None, expand=None):
                     current['routes'].append(record)
                 elif name == 'fastcgi_param' and args and args[0] in ('PHP_VALUE', 'PHP_ADMIN_VALUE'):
                     raise Hold('Nginx_injected_PHP_settings_require_review')
-                elif current is not None and name == 'alias':
-                    raise Hold('Nginx_alias_requires_separate_health_profile')
+                elif name == 'alias':
+                    need(current is not None and current_location is not None,
+                         'Nginx_alias_requires_separate_health_profile')
                 elif current is not None and name in ('server_name', 'root', 'listen'):
                     current[{'server_name': 'names', 'root': 'roots', 'listen': 'listen'}[name]].extend(args if name == 'server_name' else [args])
                 if children is not None:
-                    visit(children, current)
-        visit(directives(text), server)
+                    visit(children, current, current_location)
+        visit(directives(text), server, location)
     walk('/etc/nginx/nginx.conf')
+    for location in locations:
+        if any(name == 'alias' for name, _, _ in location['directives']):
+            validate_acme_alias(location)
     need(routes, 'no_PHP_Nginx_routes')
     health = []
     for server in servers:
@@ -1301,10 +1350,11 @@ def verify_preflight_archive_journals():
 
 
 def recover_v100_preflight(previous):
-    """Archive only two byte-identified releases' exact early Nginx rejections."""
+    """Archive only byte-identified releases' exact early Nginx rejections."""
     cases = {
         '1.0.0': (PREFLIGHT_V100_SHA256, 'nginx_path_outside_config', False),
         '1.0.1': (PREFLIGHT_V101_SHA256, 'absolute_nginx_include_required', True),
+        '1.0.2': (PREFLIGHT_V102_SHA256, 'Nginx_alias_requires_separate_health_profile', True),
     }
     need(previous.get('version') in cases, 'previous_job_preserved_use_status')
     code_sha, reason, has_details = cases[previous['version']]

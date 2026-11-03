@@ -150,7 +150,7 @@ def verify_artifact(shell, expected):
 
 def self_test():
     """Exercise the generated logic with a harmless fixture core, never real core."""
-    for version in ('1.0.0', '1.0.1', '1.0.2'):
+    for version in ('1.0.0', '1.0.1', '1.0.2', '1.0.3'):
         assert core_version(('VERSION = '+repr(version)+'\n').encode()) == version
     for invalid in (b'pass\n', b"VERSION = 'unknown'\n", b"VERSION='1.0.0'\nVERSION='1.0.1'\n"):
         try:
