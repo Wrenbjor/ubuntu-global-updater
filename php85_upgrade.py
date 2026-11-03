@@ -20,7 +20,8 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
+PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 BASE = Path('/var/lib/ubuntu-php85-upgrade')
 TARGET = '8.5'
 FLOOR = '8.5.12'
@@ -552,6 +553,48 @@ def normalize_socket(value):
     return value.replace('/var/run/', '/run/', 1)
 
 
+def nginx_vendor_file(path):
+    rows = command(['/usr/bin/dpkg-query', '-S', str(path)]).splitlines()
+    need(len(rows) == 1 and ': ' in rows[0], 'Nginx_vendor_file_owner_ambiguous')
+    owner = rows[0].split(': ', 1)[0].split(':', 1)[0]
+    need(NAME.fullmatch(owner) is not None and owner.startswith(('nginx', 'libnginx')),
+         'Nginx_vendor_package_owner_required')
+    state = command(['/usr/bin/dpkg-query', '-W', '-f=${db:Status-Abbrev}', owner]).strip()
+    need(state in ('ii', 'hi'), 'Nginx_vendor_package_not_installed')
+    installed_vendor_file(owner, path)
+    return owner
+
+
+def validate_nginx_path(path, read):
+    """Allow only stock package-owned module aliases outside /etc/nginx."""
+    logical = Path(path)
+    resolved = logical.resolve()
+    if logical.is_absolute() and '..' not in logical.parts and str(logical).startswith('/etc/nginx/'):
+        if str(resolved).startswith('/etc/nginx/'):
+            return False
+        if (logical.parent == Path('/etc/nginx/modules-enabled') and logical.suffix == '.conf'
+            and logical.is_symlink() and resolved.parent == Path('/usr/share/nginx/modules-available')
+            and resolved.suffix == '.conf'):
+            # The normal read path validates both the root-owned alias and target.
+            text = read(str(logical))
+            nginx_vendor_file(resolved)
+            definitions = directives(text)
+            need(definitions, 'empty_Nginx_vendor_module_fragment')
+            for header, children in definitions:
+                args = [token[0] for token in header]
+                need(children is None and len(args) == 2 and args[0] == 'load_module',
+                     'Nginx_vendor_module_fragment_not_loader_only')
+                match = re.fullmatch(r'(?:modules/|/usr/(?:lib/nginx|share/nginx)/modules/)([A-Za-z0-9_.-]+\.so)', args[1])
+                need(match is not None, 'noncanonical_Nginx_vendor_module_path')
+                module = Path('/usr/lib/nginx/modules') / match[1]
+                need(module.resolve().parent == Path('/usr/lib/nginx/modules'), 'Nginx_vendor_module_binary_escape')
+                nginx_vendor_file(module)
+            return True
+    error = Hold('nginx_path_outside_config')
+    error.details = dict(logical_path=str(logical), resolved_path=str(resolved))
+    raise error
+
+
 def nginx_inventory(read=None, expand=None):
     read = read or (lambda path: safe_file(path).decode())
     expand = expand or (lambda value: sorted(glob.glob(value)))
@@ -560,9 +603,17 @@ def nginx_inventory(read=None, expand=None):
     def walk(path, server=None, depth=0):
         need(depth <= 20 and len(seen) <= 500, 'nginx_include_limit')
         p = Path(path)
-        need(str(p).startswith('/etc/nginx/') and str(p.resolve()).startswith('/etc/nginx/'), 'nginx_path_outside_config')
-        text = read(str(p))
+        validated = {}
+        def validating_read(name):
+            value = read(name)
+            validated[name] = value
+            return value
+        vendor_only = validate_nginx_path(p, validating_read)
+        need(not vendor_only or server is None, 'Nginx_vendor_module_in_server_context')
+        text = validated[str(p)] if vendor_only else read(str(p))
         seen[str(p)] = text
+        if vendor_only:
+            return
 
         def visit(nodes, context):
             for header, children in nodes:
@@ -1058,9 +1109,16 @@ def inspect():
     pins = [name + '=' + record['version'] for name, record in sorted(records.items())]
     text = command(['/usr/bin/apt-get', '--simulate', '--no-remove', '--no-install-recommends', 'install'] + pins, 120)
     changes = simulated_changes(text, before, cache, host)
+    snapshot = files_snapshot(config_paths)
+    captured_text = dict(nginx['files'], **texts)
+    for entries in profile_files.values():
+        captured_text.update(entries)
+    captured_text['/etc/php/' + branch + '/fpm/php-fpm.conf'] = global_config
+    need(all(digest(text.encode()) == snapshot[path]['sha256'] for path, text in captured_text.items()),
+         'configuration_changed_during_discovery')
     plan = dict(schema=1, version=VERSION, code_sha256=digest(Path(__file__).read_bytes()), host=host,
         source_branch=branch, mode='patch' if branch == TARGET else 'migration', packages=before, sources=sources,
-        files=files_snapshot(config_paths), nginx=nginx, pools=texts, parsed_pools=parsed, socket_map=mapping,
+        files=snapshot, nginx=nginx, pools=texts, parsed_pools=parsed, socket_map=mapping,
         source_registry=source_registry, source_CLI_registry=cli, INI_files=profile_files, source_enabled=source_enabled,
         target_global_FPM=target_global, target_records=records, pins=pins, changes=changes,
         builtin_mappings=skipped, PPA_signature=verify_PPA_signature())
@@ -1220,6 +1278,76 @@ def shared_lock():
     return fd
 
 
+def verify_preflight_archive_journals():
+    for path in BASE.glob('preflight-recovery-*.json'):
+        receipt = json.loads(safe_file(path, True))
+        need(receipt.get('schema') == 1 and receipt.get('phase') == 'complete', 'unfinished_preflight_archive_preserved')
+        archive = Path(receipt.get('archive', ''))
+        need(archive.parent == BASE and archive.name.startswith('archived-preflight-job-'), 'invalid_preflight_archive_path')
+        need(digest(safe_file(archive, True)) == receipt['original_current_sha256'], 'preflight_archive_changed')
+
+
+def recover_v100_preflight(previous):
+    """Archive only the byte-identified v1.0.0 module-alias rejection."""
+    need(set(previous) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'recovery'}
+         and previous.get('version') == '1.0.0' and previous.get('phase') == 'failed_needs_review'
+         and previous.get('reason') == 'nginx_path_outside_config', 'previous_job_preserved_use_status')
+    job = Path(previous.get('job', ''))
+    need(job.parent == BASE and re.fullmatch(r'job-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', job.name), 'unrecognized_preflight_job')
+    info = job.lstat()
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o077 and not job.is_symlink(), 'unsafe_preflight_job')
+    need({p.name for p in job.iterdir()} == {'php85_upgrade.py', 'events.jsonl', 'timers.json'}, 'preflight_has_unrecognized_work_artifacts')
+    raw_current = safe_file(BASE / 'current.json', True)
+    need(json.loads(raw_current) == previous, 'preflight_current_changed')
+    old_files = {p.name: digest(safe_file(p, True)) for p in job.iterdir()}
+    need(old_files['php85_upgrade.py'] == PREFLIGHT_V100_SHA256, 'unrecognized_preflight_code')
+    raw_events = safe_file(job / 'events.jsonl', True).splitlines(keepends=True)
+    need(len(raw_events) == 3, 'preflight_journal_has_other_stages')
+    events, last = [], '0' * 64
+    for raw in raw_events:
+        row = json.loads(raw)
+        need(row.get('previous_sha256') == last, 'preflight_event_chain_changed')
+        events.append(row)
+        last = digest(raw)
+    need([row.get('phase') for row in events] == ['preflight', 'refreshing_indexes', 'failed_needs_review']
+         and events[-1].get('reason') == 'nginx_path_outside_config'
+         and events[-1].get('recovery') == str(job / 'recovery.json')
+         and previous.get('event_sha256') == last
+         and previous.get('recovery') == events[-1]['recovery'], 'preflight_stage_or_current_mismatch')
+    need(set(events[0]) == set(events[1]) == {'time', 'phase', 'previous_sha256'}
+         and set(events[-1]) == {'time', 'phase', 'previous_sha256', 'reason', 'recovery'}, 'unexpected_preflight_event_fields')
+    timers = json.loads(safe_file(job / 'timers.json', True))
+    need(isinstance(timers, list) and len(set(timers)) == len(timers)
+         and set(timers) <= {'apt-daily.timer', 'apt-daily-upgrade.timer'}, 'preflight_timer_receipt_invalid')
+    for timer in ('apt-daily.timer', 'apt-daily-upgrade.timer'):
+        observed = subprocess.run(['/bin/systemctl', 'is-active', '--quiet', timer],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        need(observed.returncode in (0, 3, 4) and (observed.returncode == 0) == (timer in timers),
+             'preflight_timers_not_restored')
+    need(not Path('/usr/sbin/policy-rc.d').exists(), 'preflight_service_policy_present')
+    archive = BASE / ('archived-preflight-' + job.name + '.json')
+    receipt_path = BASE / ('preflight-recovery-' + job.name + '.json')
+    need(not archive.exists() and not receipt_path.exists(), 'existing_preflight_archive_preserved')
+    # v1.0.0 did not persist identity before this early rejection. New apply
+    # seals a fresh plan bound to the current machine; no old package plan is reused.
+    receipt = dict(schema=1, phase='started', job=str(job), archive=str(archive),
+                   original_current_sha256=digest(raw_current), old_files=old_files,
+                   current_host=identity(), historical_host_binding='not_persisted_in_v1_0_0_preflight',
+                   old_PHP_package_stage_started=False, prior_index_refresh_possible=True)
+    atomic(receipt_path, encoded(receipt))
+    need(safe_file(BASE / 'current.json', True) == raw_current, 'preflight_current_changed_before_archive')
+    (BASE / 'current.json').rename(archive)
+    directory = os.open(BASE, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    need({p.name: digest(safe_file(p, True)) for p in job.iterdir()} == old_files, 'old_preflight_evidence_changed')
+    receipt['phase'] = 'complete'
+    atomic(receipt_path, encoded(receipt))
+    print(json.dumps(dict(phase='recognized_preflight_archived', old_job=str(job), archive=str(archive))), flush=True)
+
+
 def rollback():
     """Operator-requested route/CLI recovery only; never reverse package installs."""
     need(os.geteuid() == 0, 'root_required')
@@ -1292,9 +1420,11 @@ def apply():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Hold('another_PHP85_job_is_running')
+        verify_preflight_archive_journals()
         if (BASE / 'current.json').exists():
             previous = json.loads(safe_file(BASE / 'current.json', True))
-            need(previous.get('phase') == 'complete', 'previous_job_preserved_use_status')
+            if previous.get('phase') != 'complete':
+                recover_v100_preflight(previous)
         need(not Path('/usr/sbin/policy-rc.d').exists(), 'existing_service_policy_requires_review')
         job = BASE / ('job-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '-' + uuid.uuid4().hex[:8])
         job.mkdir(mode=0o700)
@@ -1487,7 +1617,8 @@ def apply():
                           scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False)
         except BaseException as error:
             journal.phase('failed_needs_review', reason=str(error) if isinstance(error, Hold) else type(error).__name__,
-                          recovery=str(job / 'recovery.json'))
+                          recovery=str(job / 'recovery.json') if (job / 'recovery.json').exists() else None,
+                          details=getattr(error, 'details', {}))
             raise
         finally:
             cleanup_errors = []
@@ -1553,7 +1684,7 @@ if __name__ == '__main__':
     try:
         main()
     except Hold as error:
-        print(json.dumps(dict(status='held', reason=str(error))), file=sys.stderr)
+        print(json.dumps(dict(status='held', reason=str(error), details=getattr(error, 'details', {}))), file=sys.stderr)
         sys.exit(1)
     except Exception as error:
         print(json.dumps(dict(status='failed', reason=type(error).__name__)), file=sys.stderr)

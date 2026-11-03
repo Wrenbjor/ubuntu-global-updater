@@ -22,6 +22,12 @@ It targets the configured web runtime and matching default CLI; it does not
 rewrite cron, queue, supervisor or application references to hardcoded legacy
 PHP executable paths.
 
+Stock `modules-enabled` symlinks to `/usr/share/nginx/modules-available` are
+admitted only for read-only vendor module configuration. The configuration and
+canonical `.so` library must be root-safe and match installed package ownership
+and MD5 inventory; the admitted configuration contains only the module loader.
+This exception does not admit arbitrary external include or library paths.
+
 The installer contains its complete Python payload. It downloads no additional
 updater code or Python libraries at runtime. System Python 3.10 and the existing
 Ubuntu `python3-apt` package are required. Normal authenticated APT package
@@ -56,11 +62,26 @@ the foreground operation. Interruptions and failures require inspection; do not
 repeatedly run an installer to retry an unknown package state.
 Original PHP/Nginx configurations, the sealed plan and recovery metadata are
 retained in root-private job backups under `/var/lib/ubuntu-php85-upgrade`.
-Failed jobs are preserved; no automatic retry or recovery is implied.
+Failed jobs are preserved; the exact preflight exception below is the only
+automatic recovery path. Other failures are not automatically retried.
 When 8.5 is already current and the sealed plan has no package changes, apply
 verifies it without rewriting Nginx, acting on services or changing alternatives.
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
+
+Version 1.0.1 has one narrowly defined automatic preflight recovery on the same
+`--apply` command. It can archive only the exact byte-pinned version 1.0.0
+`nginx_path_outside_config` failure, identified by its three-event chain and
+original core/events/timer evidence. Eligibility requires no sealed plan or
+package action and restored timer activity. The earlier failed apply did refresh
+cached APT indexes; this is not a claim that nothing changed. All original
+evidence and the old current-job pointer are archived durably before a new job.
+Partial archival and every other failed-job shape still hold for inspection.
+No additional recovery flag is needed.
+
+For a failure before the sealed plan, recovery metadata may not exist. Its status
+diagnostic reports `recovery: null` rather than treating that missing file as a
+new failure or manufacturing recovery instructions.
 
 After creating the updater locally, the same URL supports `--status` in place of
 `--apply`. `--plan-only` explicitly selects the default planning mode. Unsupported

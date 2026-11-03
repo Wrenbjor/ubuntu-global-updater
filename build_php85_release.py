@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -18,6 +19,14 @@ SHELL = RELEASE / 'php85.sh'
 
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def core_version(payload):
+    versions = [ast.literal_eval(node.value) for node in ast.parse(payload).body
+                if isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'VERSION']
+    assert len(versions) == 1 and isinstance(versions[0], str) and re.fullmatch(r'\d+\.\d+\.\d+', versions[0])
+    return versions[0]
 
 
 def render(payload):
@@ -117,7 +126,7 @@ def build():
     SHELL.write_bytes(raw)
     subprocess.run(['/bin/bash', '-n', str(SHELL)], check=True)
     verify_artifact(raw, payload)
-    result = dict(status='built-local-only', core_sha256=sha(payload), shell_sha256=sha(raw),
+    result = dict(status='built-local-only', version=core_version(payload), core_sha256=sha(payload), shell_sha256=sha(raw),
                   bytes=len(raw), embedded_payload_verified=True, production_actions=0)
     print(json.dumps(result))
     return result
@@ -141,6 +150,14 @@ def verify_artifact(shell, expected):
 
 def self_test():
     """Exercise the generated logic with a harmless fixture core, never real core."""
+    assert core_version(b"VERSION = '1.0.1'\n") == '1.0.1'
+    for invalid in (b'pass\n', b"VERSION = 'unknown'\n", b"VERSION='1.0.0'\nVERSION='1.0.1'\n"):
+        try:
+            core_version(invalid)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError('ambiguous version metadata accepted')
     with tempfile.TemporaryDirectory(prefix='php85-bootstrap-test-') as temporary:
         root = Path(temporary)
         marker = root / 'core-ran.json'
@@ -190,6 +207,7 @@ def self_test():
         assert not list(root.rglob('php85-bootstrap-*'))
         subprocess.run(['/bin/bash', '-n'], input=production, check=True)
     result = dict(status='bootstrap-fixtures-pass', modes=5, pipeline_modes=2, truncation_prefixes=len(cuts),
+                          version_metadata_from_core_literal=True,
                           unsafe_environment_rejected=True, minimal_core_environment=True,
                           invalid_option_rejected=True, corrupt_payload_rejected=True, real_core_executed=False,
                           package_actions=0, service_actions=0)
@@ -209,7 +227,7 @@ def packaging_review():
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert result.returncode == 0, result.stderr.decode()
         assert (staged / 'php85.sh').read_bytes() == SHELL.read_bytes(), 'root_layout_rebuild_differs'
-    receipt = dict(schema=1, review_scope='local-bootstrap-packaging-only', status='PASS',
+    receipt = dict(schema=1, version=core_version(CORE.read_bytes()), review_scope='local-bootstrap-packaging-only', status='PASS',
         artifact_sha256={name: sha((RELEASE / name).read_bytes()) for name in
                          ('php85_upgrade.py', 'php85.sh', 'README-php85.md')},
         builder_sha256=sha(Path(__file__).read_bytes()), bootstrap= built, fixtures=tested,
