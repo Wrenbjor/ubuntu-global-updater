@@ -11,7 +11,7 @@ The existing signed PPA metadata is checked against the pinned trusted primary
 key fingerprint; candidate versions and package archives are checked again for
 the sealed transaction.
 
-Version 1.0.5 recognizes one precise dual-signature case. The current pinned
+From version 1.0.5, the updater recognizes one precise dual-signature case. The current pinned
 primary fingerprint `B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6` must have a good,
 strong signature. An aggregate `gpgv` exit status of 2 is admitted only when its
 other signature is the known missing legacy key
@@ -100,7 +100,7 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.5 has five narrowly defined automatic preflight recovery cases on the
+Version 1.0.6 retains five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
@@ -120,6 +120,24 @@ The version 1.0.3 exception still requires empty details exactly. A new version
 For a failure before the sealed plan, recovery metadata may not exist. Its status
 diagnostic reports `recovery: null` rather than treating that missing file as a
 new failure or manufacturing recovery instructions.
+
+Version 1.0.6 separately addresses the exact version 1.0.5 APT hook protocol
+failure during `installing_packages`. APT 2.4 identifies hook options by the
+executable command key; a dedicated root-private job wrapper now selects protocol
+version 2 unambiguously. APT stdout/stderr are streamed to private job logs; after
+exit, their byte counts and SHA-256 hashes are bound into the event chain. A
+running native package transaction is not killed by a wrapper timeout.
+
+This installation-stage failure is not treated as a preflight rejection. Its
+distinct recovery requires the exact pinned old core and six-stage event chain,
+no accepted hook proof, and no package changes beyond the saved baseline. The full old package,
+source, configuration, identity and health baselines must still match, with
+clean package state, no active package writer, restored timer activity and no
+temporary service policy. Original CLI-alternative values and automatic/manual
+modes must be restored with a durable receipt before a fresh plan. All old
+evidence and the old current-job pointer remain archived. Any other state or a
+partial recovery holds; this is not a blind APT retry. Earlier index refresh and
+alternative preparation are acknowledged rather than described as zero changes.
 
 After creating the updater locally, the same URL supports `--status` in place of
 `--apply`. `--plan-only` explicitly selects the default planning mode. Unsupported

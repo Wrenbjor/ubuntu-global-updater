@@ -1,5 +1,5 @@
 """Mock-only PHP85 security tests: no package/service/network commands."""
-import importlib.util,os,stat,sys,tempfile,types,unittest,subprocess,time
+import importlib.util,os,stat,sys,tempfile,types,unittest,subprocess,time,contextlib,io
 from pathlib import Path
 from unittest.mock import patch
 SPEC=importlib.util.spec_from_file_location('php85_security_review',Path(__file__).parent/'php85_upgrade.py')
@@ -176,6 +176,232 @@ class PpaSignatureRealCrypto(unittest.TestCase):
   result=self.verify(self.dual)
   with patch.object(M,'PPA_KEY',self.current),patch.object(M,'PPA_LEGACY_KEY','A'*40):
    with self.assertRaises(M.Hold):M.ppa_signature_status(result.stdout.decode(),result.returncode,result.stderr.decode())
+
+class AptInstallEvidence(unittest.TestCase):
+ """Evidence uses real temp files; the APT child is always a fixture callback."""
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory(prefix='php85-apt-evidence-')
+  self.root=Path(self.tmp.name);self.root.chmod(0o700)
+  self.job=self.root/'job';self.job.mkdir(mode=0o700)
+  self.args=['/usr/bin/apt-get','--yes','--no-download','--no-remove','install','fixture-only=1']
+  self.addCleanup(self.tmp.cleanup);self.addCleanup(patch.stopall)
+  patch.object(M,'_SECURITY_ROOT',self.root).start()
+  patch.object(M,'_SECURITY_UID',os.geteuid()).start()
+  patch.object(M,'command',side_effect=AssertionError('APT evidence must not use captured command output')).start()
+  self.native=patch.object(M.subprocess,'run',side_effect=AssertionError('unmocked native process forbidden')).start()
+ def logs(self):return [self.job/'apt-install.stdout',self.job/'apt-install.stderr']
+ def run_child(self,code=0,raises=None,after_write=None,payloads=None):
+  streams=[];descriptors=[];seen=[]
+  secret_out,secret_err=payloads or (b'fixture-private-output-token\n',b'fixture-private-error-token\n')
+  def child(args,**kwargs):
+   self.assertEqual(args,self.args)
+   self.assertIn('timeout',kwargs);self.assertIsNone(kwargs['timeout'])
+   self.assertNotIn('capture_output',kwargs)
+   streams.extend([kwargs['stdout'],kwargs['stderr']])
+   for stream,path,raw in zip(streams,self.logs(),(secret_out,secret_err)):
+    fd=stream.fileno();descriptors.append(fd)
+    self.assertTrue(path.is_file())
+    self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode),0o600)
+    self.assertEqual(path.read_bytes(),b'')
+    os.write(fd,raw)
+    self.assertEqual(path.read_bytes(),raw,'child evidence is readable while the installation is still running')
+   seen.append(kwargs['env'])
+   if after_write:after_write(streams,self.logs())
+   if raises:raise raises
+   return types.SimpleNamespace(returncode=code)
+  fsynced=[];real_fsync=os.fsync
+  def fsync(fd):fsynced.append(fd);return real_fsync(fd)
+  captured=io.StringIO();captured_error=io.StringIO();failure=None;proof=None
+  with patch.object(M.subprocess,'run',side_effect=child),patch.object(M.os,'fsync',side_effect=fsync), \
+       contextlib.redirect_stdout(captured),contextlib.redirect_stderr(captured_error):
+   try:proof=M.apt_install(self.args,self.job)
+   except (M.Hold,RuntimeError) as error:failure=error
+  return dict(streams=streams,fds=descriptors,env=seen,fsynced=fsynced,error=failure,
+   stdout=captured.getvalue(),stderr=captured_error.getvalue(),raw=(secret_out,secret_err),proof=proof)
+ def closed(self,record):
+  self.assertTrue(all(stream.closed for stream in record['streams']))
+  for fd in record['fds']:
+   with self.assertRaises(OSError):os.fstat(fd)
+ def test_success_streams_live_to_0600_files_and_fsyncs_closes_both_descriptors(self):
+  result=self.run_child()
+  self.assertIsNone(result['error']);self.closed(result)
+  self.assertEqual(set(result['fsynced']),set(result['fds']))
+  self.assertEqual([path.read_bytes() for path in self.logs()],list(result['raw']))
+  self.assertEqual(result['stdout'],'');self.assertEqual(result['stderr'],'')
+  self.assertEqual(result['proof'],dict(exit_code=0,logs=[dict(path=str(path),sha256=M.hashlib.sha256(raw).hexdigest(),bytes=len(raw))
+   for path,raw in zip(self.logs(),result['raw'])]))
+ def test_nonzero_reports_only_exit_and_private_log_paths_without_output_leak(self):
+  result=self.run_child(code=100)
+  self.assertEqual(str(result['error']),'command_failed_apt-get')
+  self.assertEqual(result['error'].details,dict(exit_code=100,stdout_log=str(self.logs()[0]),stderr_log=str(self.logs()[1]),
+   logs=[dict(path=str(path),sha256=M.hashlib.sha256(raw).hexdigest(),bytes=len(raw)) for path,raw in zip(self.logs(),result['raw'])]))
+  for raw in result['raw']:
+   for public in (str(result['error']),repr(result['error'].details),result['stdout'],result['stderr']):
+    self.assertNotIn(raw.decode().strip(),public)
+  self.assertEqual(set(result['fsynced']),set(result['fds']));self.closed(result)
+ def test_child_has_minimal_environment_no_inherited_loader_or_apt_injection(self):
+  poison=dict(LD_PRELOAD='/fixture/evil.so',LD_LIBRARY_PATH='/fixture',PYTHONPATH='/fixture',
+   PHPRC='/fixture',PHP_INI_SCAN_DIR='/fixture',BASH_ENV='/fixture',CURL_HOME='/fixture')
+  with patch.dict(os.environ,poison,clear=True):result=self.run_child()
+  self.assertIsNone(result['error'])
+  environment=result['env'][0]
+  self.assertFalse(set(poison)&set(environment))
+  self.assertEqual(environment['PATH'],'/usr/sbin:/usr/bin:/sbin:/bin')
+  self.assertEqual(environment['LC_ALL'],'C');self.assertEqual(environment['DEBIAN_FRONTEND'],'noninteractive')
+ def test_apt_config_override_is_rejected_before_a_child_can_start(self):
+  with patch.dict(os.environ,{'APT_CONFIG':'/fixture/foreign-config'},clear=True),self.assertRaisesRegex(M.Hold,'APT_CONFIG'):
+   M.apt_install(self.args,self.job)
+  self.native.assert_not_called()
+  self.assertTrue(all(path.stat().st_mode&0o077==0 for path in self.logs()))
+ def test_wrong_executable_and_nonprivate_or_foreign_owned_job_are_refused(self):
+  with self.assertRaisesRegex(M.Hold,'APT_install_executable_required'):
+   M.apt_install(['/usr/bin/dpkg','fixture-only'],self.job)
+  self.job.chmod(0o750)
+  with self.assertRaisesRegex(M.Hold,'unsafe_APT_evidence_directory'):M.apt_install(self.args,self.job)
+  self.job.chmod(0o700);real=Path.lstat
+  def foreign(path):
+   info=real(path)
+   if path!=self.job:return info
+   values={name:getattr(info,name) for name in dir(info) if name.startswith('st_')}
+   values['st_uid']=os.geteuid()+1000
+   return types.SimpleNamespace(**values)
+  with patch.object(Path,'lstat',foreign),self.assertRaisesRegex(M.Hold,'unsafe_APT_evidence_directory'):
+   M.apt_install(self.args,self.job)
+  self.native.assert_not_called();self.assertFalse(any(path.exists() for path in self.logs()))
+ def test_symlinked_job_or_arbitrary_symlink_parent_cannot_redirect_evidence(self):
+  linked=self.root/'linked-job';linked.symlink_to(self.job,target_is_directory=True)
+  with self.assertRaisesRegex(M.Hold,'unsafe_APT_evidence_directory'):M.apt_install(self.args,linked)
+  parent=self.root/'linked-parent';parent.symlink_to(self.root,target_is_directory=True)
+  with self.assertRaisesRegex(M.Hold,'unsafe_file_parent'):M.apt_install(self.args,parent/'job')
+  self.native.assert_not_called();self.assertFalse(any(path.exists() for path in self.logs()))
+ def test_preexisting_stdout_file_is_preserved_and_never_truncated(self):
+  path=self.logs()[0];path.write_bytes(b'prior evidence');path.chmod(0o600)
+  with self.assertRaises(FileExistsError):M.apt_install(self.args,self.job)
+  self.native.assert_not_called();self.assertEqual(path.read_bytes(),b'prior evidence')
+  self.assertFalse(self.logs()[1].exists())
+ def test_preexisting_stderr_symlink_cannot_overwrite_a_target_and_closes_first_fd(self):
+  target=self.root/'preserve';target.write_bytes(b'untouched')
+  self.logs()[1].symlink_to(target)
+  real_open=os.open;descriptors=[]
+  def observed(path,*args,**kwargs):
+   fd=real_open(path,*args,**kwargs);descriptors.append(fd);return fd
+  with patch.object(M.os,'open',side_effect=observed),self.assertRaises(FileExistsError):
+   M.apt_install(self.args,self.job)
+  self.native.assert_not_called();self.assertEqual(target.read_bytes(),b'untouched')
+  self.assertEqual(len(descriptors),1)
+  with self.assertRaises(OSError):os.fstat(descriptors[0])
+  self.assertEqual(stat.S_IMODE(self.logs()[0].stat().st_mode),0o600)
+ def test_subprocess_exception_keeps_private_evidence_and_closes_both_streams(self):
+  result=self.run_child(raises=RuntimeError('fixture child exception'))
+  self.assertIsInstance(result['error'],RuntimeError)
+  self.closed(result)
+  self.assertEqual([path.read_bytes() for path in self.logs()],list(result['raw']))
+ def test_fchmod_failure_after_exclusive_open_does_not_leak_the_raw_descriptor(self):
+  real_open=os.open;descriptors=[]
+  def observed(path,*args,**kwargs):
+   fd=real_open(path,*args,**kwargs);descriptors.append(fd);return fd
+  with patch.object(M.os,'open',side_effect=observed),patch.object(M.os,'fchmod',side_effect=PermissionError('fixture mode failure')):
+   with self.assertRaises(PermissionError):M.apt_install(self.args,self.job)
+  self.native.assert_not_called();self.assertEqual(len(descriptors),1)
+  try:
+   with self.assertRaises(OSError):os.fstat(descriptors[0])
+  finally:
+   try:os.close(descriptors[0])
+   except OSError:pass
+ def test_fdopen_failure_closes_raw_descriptor_and_does_not_mask_original_exception(self):
+  for already_closed in (False,True):
+   with self.subTest(already_closed=already_closed):
+    for path in self.logs():
+     if path.exists():path.unlink()
+    real_open=os.open;descriptors=[];original=OSError('fixture stream wrapper failed')
+    def observed(path,*args,**kwargs):
+     fd=real_open(path,*args,**kwargs);descriptors.append(fd);return fd
+    def fdopen(fd,*args,**kwargs):
+     if already_closed:os.close(fd)
+     raise original
+    with patch.object(M.os,'open',side_effect=observed),patch.object(M.os,'fdopen',side_effect=fdopen):
+     with self.assertRaises(OSError) as caught:M.apt_install(self.args,self.job)
+    self.assertIs(caught.exception,original);self.native.assert_not_called()
+    for fd in descriptors:
+     try:
+      with self.assertRaises(OSError):os.fstat(fd)
+     finally:
+      try:os.close(fd)
+      except OSError:pass
+ def test_hashing_reads_large_output_only_in_bounded_chunks(self):
+  real_fdopen=os.fdopen;requests=[]
+  class BoundedStream:
+   def __init__(self,stream):self.stream=stream
+   def __getattr__(self,name):return getattr(self.stream,name)
+   def read(self,size=-1):
+    self_test.assertGreater(size,0);self_test.assertLessEqual(size,1024*1024)
+    requests.append(size);return self.stream.read(size)
+  self_test=self
+  with patch.object(M.os,'fdopen',side_effect=lambda *args,**kwargs:BoundedStream(real_fdopen(*args,**kwargs))):
+   result=self.run_child(payloads=(b'x'*(3*1024*1024+37),b'error evidence\n'))
+  self.assertIsNone(result['error']);self.closed(result)
+  self.assertGreaterEqual(len(requests),7)
+  self.assertEqual(result['proof']['logs'][0]['bytes'],3*1024*1024+37)
+  self.assertEqual(result['proof']['logs'][0]['sha256'],M.hashlib.sha256(result['raw'][0]).hexdigest())
+ def test_replaced_log_path_with_identical_content_is_not_accepted_as_the_child_file(self):
+  def replace(streams,paths):
+   raw=paths[0].read_bytes();paths[0].rename(self.job/'held-original.stdout')
+   paths[0].write_bytes(raw);paths[0].chmod(0o600)
+  result=self.run_child(after_write=replace)
+  self.assertEqual(str(result['error']),'APT_evidence_changed');self.closed(result)
+  self.assertIsNone(result['proof'])
+ def test_same_inode_content_mutation_during_hashing_is_rejected(self):
+  real_fdopen=os.fdopen;changed=False
+  class MutatingStream:
+   def __init__(self,stream):self.stream=stream
+   def __getattr__(self,name):return getattr(self.stream,name)
+   def read(self,size=-1):
+    nonlocal changed
+    value=self.stream.read(size)
+    if not changed and value:
+     changed=True;path=self_test.logs()[0];before=path.stat()
+     path.write_bytes(b'mutated fixture evidence\n')
+     os.utime(path,ns=(before.st_atime_ns,before.st_mtime_ns+1000000))
+    return value
+  self_test=self
+  with patch.object(M.os,'fdopen',side_effect=lambda *args,**kwargs:MutatingStream(real_fdopen(*args,**kwargs))):
+   result=self.run_child()
+  self.assertEqual(str(result['error']),'APT_evidence_changed');self.closed(result)
+  self.assertIsNone(result['proof'])
+ def test_post_child_permission_hardlink_or_owner_drift_is_rejected_before_a_success_receipt(self):
+  for mutation in ('permissions','hardlink','owner'):
+   with self.subTest(mutation=mutation):
+    for path in self.logs():
+     if path.exists():path.unlink()
+    changed_fd=[];real_fstat=os.fstat
+    def fstat(fd):
+     observed=real_fstat(fd)
+     if changed_fd and fd==changed_fd[0]:
+      values={name:getattr(observed,name) for name in dir(observed) if name.startswith('st_')}
+      values['st_uid']=os.geteuid()+1000
+      return types.SimpleNamespace(**values)
+     return observed
+    def drift(streams,paths):
+     if mutation=='permissions':paths[0].chmod(0o644)
+     elif mutation=='hardlink':os.link(paths[0],self.root/'unexpected-hardlink')
+     else:changed_fd.append(streams[0].fileno())
+    with patch.object(M.os,'fstat',side_effect=fstat):result=self.run_child(after_write=drift)
+    self.assertEqual(str(result['error']),'APT_evidence_metadata_changed')
+    self.assertIsNone(result['proof']);self.closed(result)
+ def test_initial_fstat_failure_closes_the_not_yet_wrapped_descriptor(self):
+  real_open=os.open;real_fstat=os.fstat;descriptors=[];original=OSError('fixture initial fstat failure')
+  def observed(path,*args,**kwargs):
+   fd=real_open(path,*args,**kwargs);descriptors.append(fd);return fd
+  with patch.object(M.os,'open',side_effect=observed),patch.object(M.os,'fstat',side_effect=original):
+   with self.assertRaises(OSError) as caught:M.apt_install(self.args,self.job)
+  self.assertIs(caught.exception,original);self.native.assert_not_called()
+  for fd in descriptors:
+   try:
+    with self.assertRaises(OSError):real_fstat(fd)
+   finally:
+    try:os.close(fd)
+    except OSError:pass
+
 
 class Files(unittest.TestCase):
  def setUp(self):

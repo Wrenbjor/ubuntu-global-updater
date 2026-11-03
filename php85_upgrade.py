@@ -20,12 +20,13 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.5'
+VERSION = '1.0.6'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
 PREFLIGHT_V103_SHA256 = 'd6e87c645b9360886d865ba20dda61128e42f96b2b6cd94597e6c257c54af24f'
 PREFLIGHT_V104_SHA256 = '91a9f6ef4805ecafd8b5c0de5fbaae5eb9c4b9fb475b13086c4c3bc36744b70b'
+PREINSTALL_V105_SHA256 = '9f8f78b976925bddb8a1fec30a55c5397c2a2cf34f58b0abb6d9789d2648303f'
 BASE = Path('/var/lib/ubuntu-php85-upgrade')
 TARGET = '8.5'
 FLOOR = '8.5.12'
@@ -337,7 +338,7 @@ def atomic(path, raw, mode=0o600):
             name.unlink()
 
 
-def command(args, timeout=30, env=None, input=None):
+def child_environment(env=None):
     need(not os.environ.get('APT_CONFIG'), 'APT_CONFIG_override_forbidden')
     environment = dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin', HOME='/nonexistent', LC_ALL='C', LANG='C',
         DEBIAN_FRONTEND='noninteractive', NEEDRESTART_MODE='l', UCF_FORCE_CONFFOLD='1',
@@ -346,6 +347,11 @@ def command(args, timeout=30, env=None, input=None):
         need(key == 'PHP_INI_SCAN_DIR' and isinstance(value, str)
              and re.fullmatch(r'/etc/php/[0-9]+\.[0-9]+/(?:cli|fpm)/conf\.d', value), 'unapproved_command_environment')
         environment[key] = value
+    return environment
+
+
+def command(args, timeout=30, env=None, input=None):
+    environment = child_environment(env)
     try:
         result = subprocess.run(args, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=timeout, env=environment)
@@ -362,6 +368,59 @@ def command(args, timeout=30, env=None, input=None):
                 status_codes=re.findall(r'(?m)^\[GNUPG:\] ([A-Z_]+)(?: |$)', error.gpgv_result['stdout']))
         raise error
     return result.stdout.decode('utf-8', 'strict')
+
+
+def apt_install(args, job):
+    """Stream the one approved installation to private evidence; never timeout dpkg."""
+    need(args[0] == '/usr/bin/apt-get', 'APT_install_executable_required')
+    info = job.lstat()
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid == _SECURITY_UID
+         and not info.st_mode & 0o077 and not job.is_symlink(), 'unsafe_APT_evidence_directory')
+    paths = [job / 'apt-install.stdout', job / 'apt-install.stderr']
+    streams, records, created = [], [], []
+    try:
+        for path in paths:
+            canonical, aliases = _safe_parents(path)
+            need(canonical == path and not aliases, 'unsafe_APT_evidence_path')
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                initial = os.fstat(fd)
+                stream = os.fdopen(fd, 'w+b')
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            streams.append(stream)
+            created.append(initial)
+        result = subprocess.run(args, stdout=streams[0], stderr=streams[1],
+                                env=child_environment(), timeout=None)
+        for stream, path, initial in zip(streams, paths, created):
+            stream.flush()
+            os.fsync(stream.fileno())
+            before = os.fstat(stream.fileno())
+            fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink')
+            need(stat.S_ISREG(before.st_mode) and before.st_uid == _SECURITY_UID
+                 and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
+                 and all(getattr(before, key) == getattr(initial, key) for key in fields),
+                 'APT_evidence_metadata_changed')
+            stream.seek(0)
+            checksum = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                checksum.update(chunk)
+            need(_file_identity(before) == _file_identity(os.fstat(stream.fileno()))
+                 == _file_identity(path.lstat()), 'APT_evidence_changed')
+            records.append(dict(path=str(path), sha256=checksum.hexdigest(), bytes=before.st_size))
+    finally:
+        for stream in streams:
+            stream.close()
+    if result.returncode != 0:
+        error = Hold('command_failed_apt-get')
+        error.details = dict(exit_code=result.returncode, stdout_log=str(paths[0]), stderr_log=str(paths[1]), logs=records)
+        raise error
+    return dict(exit_code=result.returncode, logs=records)
 
 
 def identity():
@@ -1546,6 +1605,256 @@ def recover_v100_preflight(previous):
     print(json.dumps(dict(phase='recognized_preflight_archived', old_job=str(job), archive=str(archive))), flush=True)
 
 
+def _preinstall_object(pairs):
+    result = {}
+    for key, value in pairs:
+        need(key not in result, 'duplicate_preinstall_JSON_key')
+        result[key] = value
+    return result
+
+
+def _preinstall_json(path):
+    return json.loads(safe_file(path, True), object_pairs_hook=_preinstall_object)
+
+
+def _preinstall_job(job):
+    need(job.parent == BASE and re.fullmatch(r'job-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', job.name),
+         'invalid_preinstall_job_path')
+    info = job.lstat()
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700
+         and not job.is_symlink(), 'unsafe_preinstall_job')
+
+
+def _preinstall_inventory(job):
+    return {path.name: digest(safe_file(path, True)) for path in sorted(job.iterdir())}
+
+
+def _preinstall_fields(raw):
+    result = {}
+    for field in ('Name', 'Status', 'Value', 'Best'):
+        rows = re.findall(r'^' + field + r': (.+)$', raw, re.M)
+        need(len(rows) == 1, 'preinstall_alternative_query_incomplete')
+        result[field] = rows[0]
+    return result
+
+
+def _preinstall_selectors(values, modes, restored=False):
+    allowed = {'php', 'phar', 'phar.phar', 'phpize', 'php-config'}
+    need(isinstance(values, dict) and isinstance(modes, dict) and set(values) == set(modes)
+         and 'php' in values and set(values) <= allowed, 'invalid_preinstall_alternative_receipts')
+    selections = {}
+    for line in command(['/usr/bin/update-alternatives', '--get-selections']).splitlines():
+        fields = line.split()
+        if fields and fields[0] in allowed:
+            need(len(fields) == 3 and fields[0] not in selections, 'preinstall_alternative_inventory_changed')
+            selections[fields[0]] = fields[1:]
+    need(set(selections) == set(values), 'preinstall_alternative_set_changed')
+    proof = {}
+    for name in sorted(values):
+        value, mode = values[name], modes[name]
+        need(isinstance(value, str) and value.startswith('/') and '..' not in value.split('/')
+             and not any(ord(c) < 32 or ord(c) == 127 for c in value)
+             and mode in ('auto', 'manual'), 'invalid_preinstall_alternative_receipt')
+        row = _preinstall_fields(command(['/usr/bin/update-alternatives', '--query', name]))
+        expected_mode = mode if restored else 'manual'
+        need(row['Name'] == name and row['Value'] == value and row['Status'] == expected_mode
+             and selections[name] == [expected_mode, value], 'preinstall_alternative_selection_drift')
+        if mode == 'auto':
+            need(row['Best'] == value, 'preinstall_automatic_Best_changed')
+        proof[name] = row
+    return proof
+
+
+def _preinstall_timers(timers):
+    need(isinstance(timers, list) and all(isinstance(name, str) for name in timers)
+         and len(set(timers)) == len(timers)
+         and set(timers) <= {'apt-daily.timer', 'apt-daily-upgrade.timer'}, 'invalid_preinstall_timer_receipt')
+    for timer in ('apt-daily.timer', 'apt-daily-upgrade.timer'):
+        state = command(['/bin/systemctl', 'show', timer, '-p', 'ActiveState', '--value']).strip()
+        need(state in ('active', 'inactive') and (state == 'active') == (timer in timers),
+             'preinstall_timers_not_restored')
+
+
+def _preinstall_runtime(branch):
+    unit = 'php' + branch + '-fpm.service'
+    command(['/bin/systemctl', 'is-active', '--quiet', unit])
+    pid = command(['/bin/systemctl', 'show', unit, '-p', 'MainPID', '--value']).strip()
+    need(pid.isdigit() and int(pid) > 1, 'preinstall_original_FPM_master_missing')
+    process = Path('/proc') / pid
+    def start():
+        with (process / 'stat').open('rb') as stream:
+            raw = stream.read(65537)
+        need(len(raw) <= 65536, 'preinstall_FPM_stat_bound')
+        fields = raw.decode().rsplit(')', 1)[1].split()
+        need(len(fields) >= 20 and fields[0] not in ('Z', 'X', 'x') and fields[19].isdigit(),
+             'preinstall_original_FPM_not_live')
+        return fields[19]
+    before = start()
+    expected = Path('/usr/sbin/php-fpm' + branch)
+    disk, live = expected.stat(), (process / 'exe').stat()
+    need(os.readlink(process / 'exe') == str(expected)
+         and stat.S_ISREG(disk.st_mode) and disk.st_uid == 0 and not disk.st_mode & 0o022
+         and (disk.st_dev, disk.st_ino) == (live.st_dev, live.st_ino)
+         and start() == before
+         and command(['/bin/systemctl', 'show', unit, '-p', 'MainPID', '--value']).strip() == pid,
+         'preinstall_original_FPM_identity_changed')
+    return dict(master_pid=int(pid), start_time_ticks=before, current_native_executable=True)
+
+
+def _preinstall_baseline(plan, timers):
+    need(identity() == plan['host'], 'preinstall_host_changed')
+    need(source_files() == plan['sources'], 'preinstall_sources_or_keys_changed')
+    need(files_snapshot(plan['files']) == plan['files'], 'preinstall_configuration_changed')
+    need(packages() == plan['packages'], 'preinstall_package_baseline_changed')
+    installed = {}
+    raw = command(['/usr/bin/dpkg-query', '-W', '-f=${binary:Package}\t${Version}\t${Architecture}\t${db:Status-Abbrev}\n'])
+    for line in raw.splitlines():
+        fields = line.split('\t')
+        need(len(fields) == 4, 'preinstall_package_query_malformed')
+        name, version, architecture, status = fields
+        if ':' in name:
+            name, suffix = name.rsplit(':', 1)
+            need(suffix == architecture, 'preinstall_package_architecture_suffix_mismatch')
+        need(re.fullmatch(r'[a-z0-9][a-z0-9+.-]*', name), 'preinstall_package_name_malformed')
+        status = status.strip()
+        if status.startswith('rc') or status in ('un', 'pn'):
+            continue
+        need(status == 'ii' and name not in installed, 'preinstall_package_status_not_clean_ii')
+        installed[name] = dict(version=version, architecture=architecture)
+    need(installed == plan['packages'], 'preinstall_full_installed_table_changed')
+    branch = plan['source_branch']
+    need(Path('/usr/bin/php').resolve() == Path('/usr/bin/php' + branch).resolve(),
+         'preinstall_default_CLI_branch_changed')
+    validate_loaders(branch, plan['INI_files'], plan['packages'])
+    need(registry(branch) == plan['source_CLI_registry'], 'preinstall_original_CLI_registry_changed')
+    need(not Path('/usr/sbin/policy-rc.d').exists() and not Path('/usr/sbin/policy-rc.d').is_symlink(),
+         'preinstall_service_policy_present')
+    source_unit = validate_native_unit(branch, True)
+    need(source_unit in plan['files'] and unit_enabled(branch) is plan['source_enabled'],
+         'preinstall_original_FPM_unit_or_enablement_changed')
+    proof = _preinstall_runtime(branch)
+    _preinstall_timers(timers)
+    health(plan['nginx']['health'])
+    return proof
+
+
+def verify_preinstall_recovery_journals():
+    """Run before any new apply, including when current.json is absent."""
+    for path in BASE.glob('preinstall-recovery-*.json'):
+        receipt = _preinstall_json(path)
+        need(receipt.get('schema') == 1 and receipt.get('phase') == 'complete',
+             'unfinished_preinstall_recovery_preserved')
+        job, archive = Path(receipt.get('job', '')), Path(receipt.get('archive', ''))
+        _preinstall_job(job)
+        need(path.name == 'preinstall-recovery-' + job.name + '.json'
+             and archive == BASE / ('archived-preinstall-' + job.name + '.json'), 'invalid_preinstall_archive_path')
+        need(digest(safe_file(archive, True)) == receipt['original_current_sha256']
+             and _preinstall_inventory(job) == receipt['old_files'], 'preinstall_archived_evidence_changed')
+
+
+def recover_v105_preinstall(previous):
+    """Archive only proven zero-package-effect v1.0.5 hook-transport failure."""
+    need(set(previous) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'details', 'recovery'}
+         and previous['version'] == '1.0.5' and previous['phase'] == 'failed_needs_review'
+         and previous['reason'] == 'command_failed_apt-get' and previous['details'] == {},
+         'previous_install_job_requires_review')
+    job = Path(previous['job'])
+    _preinstall_job(job)
+    need(previous['recovery'] == str(job / 'recovery.json'), 'unexpected_preinstall_recovery_pointer')
+    raw_current = safe_file(BASE / 'current.json', True)
+    need(_preinstall_json(BASE / 'current.json') == previous, 'preinstall_current_changed')
+    plan_raw = safe_file(job / 'plan.json', True)
+    plan = _preinstall_json(job / 'plan.json')
+    need(plan.get('schema') == 1 and plan.get('version') == '1.0.5'
+         and plan.get('code_sha256') == PREINSTALL_V105_SHA256
+         and digest(safe_file(job / 'php85_upgrade.py', True)) == PREINSTALL_V105_SHA256,
+         'unrecognized_preinstall_source_or_plan')
+    seal = safe_file(job / 'plan.sha256', True).decode()
+    need(plan_raw == encoded(plan) and seal == digest(plan_raw) + '\n', 'preinstall_plan_seal_changed')
+    branch = plan.get('source_branch', '')
+    need(re.fullmatch(r'7\.[234]|8\.[0-5]', branch) and plan.get('mode') == ('patch' if branch == '8.5' else 'migration')
+         and isinstance(plan.get('changes'), dict) and plan['changes'], 'unexpected_preinstall_plan_mode')
+    expected_names = {'php85_upgrade.py', 'events.jsonl', 'timers.json', 'plan.json', 'plan.sha256',
+                      'recovery.json', 'alternatives.json', 'alternative-modes.json'}
+    expected_names.update('configuration-' + str(index) for index in range(len(plan['files'])))
+    need({path.name for path in job.iterdir()} == expected_names, 'preinstall_has_other_work_artifacts')
+    old_files = _preinstall_inventory(job)
+    for index, (path, row) in enumerate(sorted(plan['files'].items())):
+        need(digest(safe_file(job / ('configuration-' + str(index)), True)) == row['sha256'],
+             'preinstall_configuration_backup_changed')
+    recovery = _preinstall_json(job / 'recovery.json')
+    need(set(recovery) == {'files', 'old_service', 'old_cli'} and recovery['files'] == plan['files']
+         and recovery['old_service'] == 'php' + branch + '-fpm.service', 'preinstall_recovery_receipt_changed')
+    values, modes = _preinstall_json(job / 'alternatives.json'), _preinstall_json(job / 'alternative-modes.json')
+    old_cli = _preinstall_fields(recovery['old_cli'])
+    need(old_cli['Name'] == 'php' and old_cli['Value'] == values.get('php')
+         and old_cli['Status'] == modes.get('php'), 'preinstall_original_CLI_receipts_disagree')
+    events, last = [], '0' * 64
+    raw_events = safe_file(job / 'events.jsonl', True).splitlines(keepends=True)
+    need(len(raw_events) == 6, 'unexpected_preinstall_journal_length')
+    for raw in raw_events:
+        row = json.loads(raw, object_pairs_hook=_preinstall_object)
+        need(row.get('previous_sha256') == last and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', row.get('time', '')),
+             'preinstall_event_chain_changed')
+        events.append(row)
+        last = digest(raw)
+    need([row['phase'] for row in events] == ['preflight', 'refreshing_indexes', 'plan_sealed',
+         'downloading_packages', 'installing_packages', 'failed_needs_review'], 'unexpected_preinstall_stages')
+    common = {'time', 'phase', 'previous_sha256'}
+    need(all(set(events[index]) == common for index in (0, 1, 3, 4))
+         and set(events[2]) == common | {'source', 'target', 'changed_packages', 'plan_sha256'}
+         and events[2]['source'] == branch and events[2]['target'] == '8.5'
+         and events[2]['changed_packages'] == sorted(plan['changes']) and events[2]['plan_sha256'] == digest(plan_raw)
+         and set(events[5]) == common | {'reason', 'details', 'recovery'}
+         and all(events[5][key] == previous[key] for key in ('reason', 'details', 'recovery'))
+         and previous['event_sha256'] == last, 'preinstall_event_or_current_mismatch')
+    archive = BASE / ('archived-preinstall-' + job.name + '.json')
+    receipt_path = BASE / ('preinstall-recovery-' + job.name + '.json')
+    need(not archive.exists() and not archive.is_symlink() and not receipt_path.exists()
+         and not receipt_path.is_symlink(), 'existing_preinstall_recovery_preserved')
+    shared, held = None, []
+    try:
+        shared = shared_lock()
+        held = package_locks()
+        timers = _preinstall_json(job / 'timers.json')
+        runtime_before = _preinstall_baseline(plan, timers)
+        selectors = _preinstall_selectors(values, modes)
+        need(_preinstall_inventory(job) == old_files and safe_file(BASE / 'current.json', True) == raw_current,
+             'preinstall_evidence_changed_before_recovery')
+        restore = [dict(name=name, value=values[name], original_mode=modes[name]) for name in sorted(values)]
+        receipt = dict(schema=1, phase='started', time=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            job=str(job), archive=str(archive), old_files=old_files, original_current_sha256=digest(raw_current),
+            original_source_sha256=PREINSTALL_V105_SHA256, plan_sha256=digest(plan_raw), restore_alternatives=restore,
+            cause_basis='confirmed_v105_hook_transport_defect_and_unchanged_baseline',
+            prior_index_refresh_possible=True, old_APT_stderr_not_preserved=True,
+            package_actions=0, service_actions=0, runtime_before=runtime_before)
+        atomic(receipt_path, encoded(receipt))
+        for name in sorted(values):
+            if modes[name] == 'auto':
+                command(['/usr/bin/update-alternatives', '--auto', name])
+        _preinstall_selectors(values, modes, restored=True)
+        receipt['runtime_after'] = _preinstall_baseline(plan, timers)
+        need(_preinstall_inventory(job) == old_files and safe_file(BASE / 'current.json', True) == raw_current,
+             'preinstall_baseline_or_evidence_changed_after_restore')
+        (BASE / 'current.json').rename(archive)
+        fd = os.open(BASE, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        need(digest(safe_file(archive, True)) == receipt['original_current_sha256'], 'preinstall_archive_changed')
+        receipt['phase'] = 'complete'
+        receipt['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        atomic(receipt_path, encoded(receipt))
+        return dict(phase='recognized_v105_preinstall_failure_archived', old_job=str(job), archive=str(archive),
+                    package_actions=0, service_actions=0)
+    finally:
+        for fd in reversed(held):
+            os.close(fd)
+        if shared is not None:
+            os.close(shared)
+
+
 def rollback():
     """Operator-requested route/CLI recovery only; never reverse package installs."""
     need(os.geteuid() == 0, 'root_required')
@@ -1625,10 +1934,15 @@ def apply():
         except BlockingIOError:
             raise Hold('another_PHP85_job_is_running')
         verify_preflight_archive_journals()
+        verify_preinstall_recovery_journals()
         if (BASE / 'current.json').exists():
             previous = json.loads(safe_file(BASE / 'current.json', True))
             if previous.get('phase') != 'complete':
-                recover_v100_preflight(previous)
+                if previous.get('version') == '1.0.5':
+                    recovered = recover_v105_preinstall(previous)
+                    print(json.dumps(recovered), flush=True)
+                else:
+                    recover_v100_preflight(previous)
         need(not Path('/usr/sbin/policy-rc.d').exists(), 'existing_service_policy_requires_review')
         job = BASE / ('job-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '-' + uuid.uuid4().hex[:8])
         job.mkdir(mode=0o700)
@@ -1692,12 +2006,17 @@ def apply():
                     policy_identity = (info.st_dev, info.st_ino)
                 policy_digest = digest(policy)
                 journal.phase('installing_packages')
-                hook_command = '/usr/bin/python3 -I ' + str(job / 'php85_upgrade.py') + ' --apt-hook ' + str(job / 'plan.json')
+                hook_command = str(job / 'apt-hook')
+                wrapper = ('#!/bin/sh\nexec /usr/bin/python3 -I ' + str(job / 'php85_upgrade.py')
+                           + ' --apt-hook ' + str(job / 'plan.json') + '\n').encode()
+                atomic(job / 'apt-hook', wrapper, 0o700)
+                need(safe_file(job / 'apt-hook', True) == wrapper, 'APT_hook_wrapper_changed')
                 # Do not wall-clock kill a running dpkg transaction.
-                command(['/usr/bin/apt-get', '--yes', '--no-remove', '--no-download', '--no-install-recommends'] + apt_options() +
+                installation = apt_install(['/usr/bin/apt-get', '--yes', '--no-remove', '--no-download', '--no-install-recommends'] + apt_options() +
                     ['-o', 'Dpkg::Options::=--force-confold', '-o', 'DPkg::Pre-Install-Pkgs::=' + hook_command,
                      '-o', 'DPkg::Tools::Options::' + hook_command + '::Version=2',
-                     '-o', 'DPkg::Tools::Options::' + hook_command + '::InfoFD=0', 'install'] + plan['pins'], None)
+                     '-o', 'DPkg::Tools::Options::' + hook_command + '::InfoFD=0', 'install'] + plan['pins'], job)
+                journal.phase('APT_install_exited', **installation)
                 proof = json.loads(safe_file(job / 'hook-accepted.json', True))
                 need(proof == dict(plan_sha256=digest(encoded(plan)), accepted=True), 'actual_APT_hook_proof_missing')
                 info = Path('/usr/sbin/policy-rc.d').lstat()
