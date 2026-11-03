@@ -22,6 +22,13 @@ It targets the configured web runtime and matching default CLI; it does not
 rewrite cron, queue, supervisor or application references to hardcoded legacy
 PHP executable paths.
 
+Static relative Nginx includes are resolved from the main configuration directory,
+`/etc/nginx`, matching native Nginx behavior. This supports standard Forge
+`forge-conf/site/before/*`, `forge-conf/site/server/*`,
+`forge-conf/site/after/*` and `fastcgi_params` includes. Dynamic values, parent
+directory references and paths escaping the allowed configuration tree still
+hold. This does not broaden the separate vendor-module exception below.
+
 Stock `modules-enabled` symlinks to `/usr/share/nginx/modules-available` are
 admitted only for read-only vendor module configuration. The configuration and
 canonical `.so` library must be root-safe and match installed package ownership
@@ -69,15 +76,17 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.1 has one narrowly defined automatic preflight recovery on the same
-`--apply` command. It can archive only the exact byte-pinned version 1.0.0
-`nginx_path_outside_config` failure, identified by its three-event chain and
-original core/events/timer evidence. Eligibility requires no sealed plan or
-package action and restored timer activity. The earlier failed apply did refresh
-cached APT indexes; this is not a claim that nothing changed. All original
-evidence and the old current-job pointer are archived durably before a new job.
-Partial archival and every other failed-job shape still hold for inspection.
-No additional recovery flag is needed.
+Version 1.0.2 has two narrowly defined automatic preflight recovery cases on the
+same `--apply` command: the exact byte-pinned version 1.0.0
+`nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
+`absolute_nginx_include_required` failure. Each must match its original core,
+three-event preflight chain and timer evidence, with empty failure details and
+no recovery reference. Eligibility requires no sealed plan or package action
+and restored timer activity. Cached APT indexes may already have been refreshed;
+this is not a claim that nothing changed. All original evidence and the old
+current-job pointer are archived durably before a new job. Partial archival and
+every other failed-job shape still hold for inspection. No additional recovery
+flag or host ID is needed; rerun the same apply command.
 
 For a failure before the sealed plan, recovery metadata may not exist. Its status
 diagnostic reports `recovery: null` rather than treating that missing file as a

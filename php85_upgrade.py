@@ -20,8 +20,9 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
+PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 BASE = Path('/var/lib/ubuntu-php85-upgrade')
 TARGET = '8.5'
 FLOOR = '8.5.12'
@@ -595,6 +596,18 @@ def validate_nginx_path(path, read):
     raise error
 
 
+def nginx_include_pattern(argument, source):
+    """Nginx resolves relative includes against its main configuration prefix."""
+    normalized = os.path.normpath(os.path.join('/etc/nginx', argument))
+    if (not argument or '$' in argument or any(ord(c) < 32 or ord(c) == 127 for c in argument)
+        or '..' in argument.split('/') or not normalized.startswith('/etc/nginx/')):
+        error = Hold('unsafe_nginx_include')
+        error.details = dict(source_file=str(source), include_argument=argument,
+                             normalized_pattern=normalized)
+        raise error
+    return normalized
+
+
 def nginx_inventory(read=None, expand=None):
     read = read or (lambda path: safe_file(path).decode())
     expand = expand or (lambda value: sorted(glob.glob(value)))
@@ -624,8 +637,8 @@ def nginx_inventory(read=None, expand=None):
                     current = dict(names=[], roots=[], listen=[], routes=[])
                     servers.append(current)
                 if name == 'include':
-                    need(len(args) == 1 and args[0].startswith('/etc/nginx/') and '$' not in args[0], 'absolute_nginx_include_required')
-                    for child in expand(args[0]):
+                    need(len(args) == 1, 'single_nginx_include_argument_required')
+                    for child in expand(nginx_include_pattern(args[0], str(p))):
                         walk(child, current, depth + 1)
                 elif name == 'fastcgi_pass':
                     need(current is not None and len(args) == 1 and args[0].startswith('unix:'), 'direct_Unix_FastCGI_required')
@@ -1048,8 +1061,8 @@ def inspect():
     command(['/bin/systemctl', 'is-active', '--quiet', 'nginx.service'])
     nginx = nginx_inventory()
     dumped = command(['/usr/sbin/nginx', '-T'])
-    observed = set(re.findall(r'^# configuration file (/.+):$', dumped, re.M))
-    need(observed == set(nginx['files']), 'Nginx_include_graph_mismatch')
+    observed = {os.path.normpath(path) for path in re.findall(r'^# configuration file (/.+):$', dumped, re.M)}
+    need(observed == {os.path.normpath(path) for path in nginx['files']}, 'Nginx_include_graph_mismatch')
     found = []
     pool_sets = {}
     for branch in ('7.2', '7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5'):
@@ -1288,10 +1301,20 @@ def verify_preflight_archive_journals():
 
 
 def recover_v100_preflight(previous):
-    """Archive only the byte-identified v1.0.0 module-alias rejection."""
-    need(set(previous) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'recovery'}
-         and previous.get('version') == '1.0.0' and previous.get('phase') == 'failed_needs_review'
-         and previous.get('reason') == 'nginx_path_outside_config', 'previous_job_preserved_use_status')
+    """Archive only two byte-identified releases' exact early Nginx rejections."""
+    cases = {
+        '1.0.0': (PREFLIGHT_V100_SHA256, 'nginx_path_outside_config', False),
+        '1.0.1': (PREFLIGHT_V101_SHA256, 'absolute_nginx_include_required', True),
+    }
+    need(previous.get('version') in cases, 'previous_job_preserved_use_status')
+    code_sha, reason, has_details = cases[previous['version']]
+    fields = {'version', 'job', 'phase', 'event_sha256', 'reason', 'recovery'}
+    if has_details:
+        fields.add('details')
+    need(set(previous) == fields and previous.get('phase') == 'failed_needs_review'
+         and previous.get('reason') == reason
+         and (not has_details or (previous['details'] == {} and previous['recovery'] is None)),
+         'previous_job_preserved_use_status')
     job = Path(previous.get('job', ''))
     need(job.parent == BASE and re.fullmatch(r'job-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', job.name), 'unrecognized_preflight_job')
     info = job.lstat()
@@ -1300,7 +1323,7 @@ def recover_v100_preflight(previous):
     raw_current = safe_file(BASE / 'current.json', True)
     need(json.loads(raw_current) == previous, 'preflight_current_changed')
     old_files = {p.name: digest(safe_file(p, True)) for p in job.iterdir()}
-    need(old_files['php85_upgrade.py'] == PREFLIGHT_V100_SHA256, 'unrecognized_preflight_code')
+    need(old_files['php85_upgrade.py'] == code_sha, 'unrecognized_preflight_code')
     raw_events = safe_file(job / 'events.jsonl', True).splitlines(keepends=True)
     need(len(raw_events) == 3, 'preflight_journal_has_other_stages')
     events, last = [], '0' * 64
@@ -1310,12 +1333,16 @@ def recover_v100_preflight(previous):
         events.append(row)
         last = digest(raw)
     need([row.get('phase') for row in events] == ['preflight', 'refreshing_indexes', 'failed_needs_review']
-         and events[-1].get('reason') == 'nginx_path_outside_config'
-         and events[-1].get('recovery') == str(job / 'recovery.json')
+         and events[-1].get('reason') == reason
+         and events[-1].get('recovery') == (None if has_details else str(job / 'recovery.json'))
+         and (not has_details or events[-1].get('details') == {})
          and previous.get('event_sha256') == last
          and previous.get('recovery') == events[-1]['recovery'], 'preflight_stage_or_current_mismatch')
+    event_fields = {'time', 'phase', 'previous_sha256', 'reason', 'recovery'}
+    if has_details:
+        event_fields.add('details')
     need(set(events[0]) == set(events[1]) == {'time', 'phase', 'previous_sha256'}
-         and set(events[-1]) == {'time', 'phase', 'previous_sha256', 'reason', 'recovery'}, 'unexpected_preflight_event_fields')
+         and set(events[-1]) == event_fields, 'unexpected_preflight_event_fields')
     timers = json.loads(safe_file(job / 'timers.json', True))
     need(isinstance(timers, list) and len(set(timers)) == len(timers)
          and set(timers) <= {'apt-daily.timer', 'apt-daily-upgrade.timer'}, 'preflight_timer_receipt_invalid')
@@ -1328,11 +1355,11 @@ def recover_v100_preflight(previous):
     archive = BASE / ('archived-preflight-' + job.name + '.json')
     receipt_path = BASE / ('preflight-recovery-' + job.name + '.json')
     need(not archive.exists() and not receipt_path.exists(), 'existing_preflight_archive_preserved')
-    # v1.0.0 did not persist identity before this early rejection. New apply
+    # These releases did not persist identity before their early rejections. New apply
     # seals a fresh plan bound to the current machine; no old package plan is reused.
     receipt = dict(schema=1, phase='started', job=str(job), archive=str(archive),
                    original_current_sha256=digest(raw_current), old_files=old_files,
-                   current_host=identity(), historical_host_binding='not_persisted_in_v1_0_0_preflight',
+                   current_host=identity(), historical_host_binding='not_persisted_in_v' + previous['version'].replace('.', '_') + '_preflight',
                    old_PHP_package_stage_started=False, prior_index_refresh_possible=True)
     atomic(receipt_path, encoded(receipt))
     need(safe_file(BASE / 'current.json', True) == raw_current, 'preflight_current_changed_before_archive')
