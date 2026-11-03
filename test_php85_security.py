@@ -1,9 +1,181 @@
 """Mock-only PHP85 security tests: no package/service/network commands."""
-import importlib.util,os,stat,sys,tempfile,types,unittest
+import importlib.util,os,stat,sys,tempfile,types,unittest,subprocess,time
 from pathlib import Path
 from unittest.mock import patch
 SPEC=importlib.util.spec_from_file_location('php85_security_review',Path(__file__).parent/'php85_upgrade.py')
 M=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(M)
+
+def ppa_good_status(fingerprint=None,digest='10',timestamp='1793700000'):
+ fingerprint=fingerprint or M.PPA_KEY
+ return ('[GNUPG:] NEWSIG\n[GNUPG:] KEY_CONSIDERED '+fingerprint+' 0\n'
+  '[GNUPG:] SIG_ID fixture 2026-11-03 '+timestamp+'\n'
+  '[GNUPG:] GOODSIG '+fingerprint[-16:]+' Offline public signature fixture\n'
+  '[GNUPG:] VALIDSIG '+fingerprint+' 2026-11-03 '+timestamp+' 0 4 0 1 '+digest+' 01 '+fingerprint+'\n')
+
+def ppa_legacy_missing(fingerprint=None,timestamp='1793700000'):
+ fingerprint=fingerprint or M.PPA_LEGACY_KEY
+ return ('[GNUPG:] NEWSIG\n[GNUPG:] ERRSIG '+fingerprint[-16:]+' 1 10 01 '+timestamp+' 9 '+fingerprint+'\n'
+         '[GNUPG:] NO_PUBKEY '+fingerprint[-16:]+'\n')
+
+def ppa_dual_stderr(current=None,legacy=None):
+ current=current or M.PPA_KEY;legacy=legacy or M.PPA_LEGACY_KEY
+ return ('gpgv: Signature made Tue Nov  3 12:00:00 2026 UTC\n'
+  'gpgv:                using RSA key '+current+'\n'
+  'gpgv: Good signature from "Offline public signature fixture"\n'
+  'gpgv: Signature made Tue Nov  3 12:00:00 2026 UTC\n'
+  'gpgv:                using RSA key '+legacy+'\n'
+  "gpgv: Can't check signature: No public key\n")
+
+
+class PpaSignatureStatus(unittest.TestCase):
+ def setUp(self):
+  self.addCleanup(patch.stopall)
+  patch.object(M,'command',side_effect=AssertionError('status parser must not execute commands')).start()
+  patch.object(M.subprocess,'run',side_effect=AssertionError('status parser must not create subprocesses')).start()
+ def accept(self,output,code=0,stderr='',missing=False):
+  proof=M.ppa_signature_status(output,code,stderr)
+  self.assertEqual(proof['primary_fingerprint'],M.PPA_KEY)
+  self.assertEqual(proof['signing_fingerprint'],M.PPA_KEY)
+  self.assertEqual(proof['missing_legacy_signature'],missing)
+  self.assertEqual(proof['gpgv_exit_code'],code)
+  return proof
+ def reject(self,output,code=2,stderr=None):
+  with self.assertRaises(M.Hold):
+   M.ppa_signature_status(output,code,ppa_dual_stderr() if stderr is None else stderr)
+ def test_normal_current_signature_and_optional_known_legacy_good_signature(self):
+  self.accept(ppa_good_status())
+  self.accept(ppa_good_status()+ppa_good_status(M.PPA_LEGACY_KEY))
+  self.accept(ppa_good_status(M.PPA_LEGACY_KEY)+ppa_good_status())
+ def test_exact_missing_legacy_signature_is_accepted_in_both_group_orders(self):
+  for output in (ppa_good_status()+ppa_legacy_missing(),ppa_legacy_missing()+ppa_good_status()):
+   with self.subTest(output=output[:45]):self.accept(output,2,ppa_dual_stderr(),True)
+ def test_other_exit_codes_and_incomplete_dual_cases_are_rejected(self):
+  good=ppa_good_status();dual=good+ppa_legacy_missing()
+  for code,output in ((1,dual),(3,dual),(255,dual),(2,good),(2,ppa_legacy_missing()),(0,dual)):
+   with self.subTest(code=code,output=output[:45]):self.reject(output,code)
+ def test_missing_or_unknown_current_or_legacy_identity_is_rejected(self):
+  for output,code in ((ppa_good_status(M.PPA_LEGACY_KEY),0),(ppa_good_status('A'*40),0),
+                      (ppa_good_status()+ppa_legacy_missing('A'*40),2)):
+   with self.subTest(code=code,output=output[-50:]):self.reject(output,code)
+ def test_all_three_strong_digests_are_accepted_and_weak_digests_rejected(self):
+  for digest in ('8','9','10'):
+   with self.subTest(digest=digest):self.accept(ppa_good_status(digest=digest))
+  for digest in ('1','2','3','11','bad'):
+   with self.subTest(digest=digest):self.reject(ppa_good_status(digest=digest),0,'')
+ def test_current_good_and_valid_signature_keyids_must_agree_with_primary_pin(self):
+  good=ppa_good_status()
+  cases=(good.replace('GOODSIG '+M.PPA_KEY[-16:],'GOODSIG '+'A'*16),
+         good.replace('VALIDSIG '+M.PPA_KEY,'VALIDSIG '+'A'*40),
+         good.rsplit(M.PPA_KEY,1)[0]+'A'*40+'\n')
+  for output in cases:
+   with self.subTest(output=output[-65:]):self.reject(output,0,'')
+ def test_signature_algorithm_class_version_reserved_fields_and_expiration_are_validated(self):
+  good=ppa_good_status()
+  for replacement in ('0 4 0 17 10 01','0 4 0 1 10 00','0 3 0 1 10 01',
+                      '0 4 1 1 10 01','1 4 0 1 10 01'):
+   with self.subTest(replacement=replacement):self.reject(good.replace('0 4 0 1 10 01',replacement),0,'')
+ def test_legacy_error_requires_exact_missing_key_code_fingerprint_and_pairing(self):
+  legacy=ppa_legacy_missing()
+  invalid=(legacy.replace(' 9 '+M.PPA_LEGACY_KEY,' 4 '+M.PPA_LEGACY_KEY),
+           legacy.replace('NO_PUBKEY '+M.PPA_LEGACY_KEY[-16:],'NO_PUBKEY '+'A'*16),
+           legacy.replace('ERRSIG '+M.PPA_LEGACY_KEY[-16:],'ERRSIG '+'A'*16),
+           legacy.replace(' 9 '+M.PPA_LEGACY_KEY,' 9 '+'A'*40),
+           '\n'.join(line for line in legacy.splitlines() if 'NO_PUBKEY' not in line)+'\n',
+           '\n'.join(line for line in legacy.splitlines() if 'ERRSIG' not in line)+'\n')
+  for output in invalid:
+   with self.subTest(output=output[-75:]):self.reject(ppa_good_status()+output)
+ def test_legacy_algorithm_digest_class_and_creation_time_must_match_case(self):
+  legacy=ppa_legacy_missing()
+  for output in (legacy.replace(' 1 10 01 ',' 17 10 01 '),legacy.replace(' 1 10 01 ',' 1 2 01 '),
+                 legacy.replace(' 1 10 01 ',' 1 10 00 '),legacy.replace('1793700000','1793700001')):
+   with self.subTest(output=output[-95:]):self.reject(ppa_good_status()+output)
+ def test_duplicate_extra_empty_or_unpaired_signature_groups_are_rejected(self):
+  good=ppa_good_status();legacy=ppa_legacy_missing()
+  for output in (good+good,good+legacy+legacy,good+legacy+'[GNUPG:] NEWSIG\n',
+                 good.replace('[GNUPG:] NEWSIG\n','',1)+legacy,
+                 good+next(line+'\n' for line in good.splitlines() if 'VALIDSIG' in line),
+                 good+next(line+'\n' for line in good.splitlines() if 'GOODSIG' in line)+legacy):
+   with self.subTest(output=output[-100:]):self.reject(output)
+ def test_bad_expired_revoked_unknown_and_resource_statuses_are_rejected(self):
+  for name in ('BADSIG','EXPSIG','EXPKEYSIG','REVKEYSIG','KEYEXPIRED','SIGEXPIRED','NODATA',
+               'FAILURE','ERROR','UNEXPECTED','UNKNOWN_STATUS'):
+   with self.subTest(name=name):self.reject(ppa_good_status()+'[GNUPG:] '+name+' fixture\n',0,'')
+ def test_malformed_status_stream_or_signature_fields_are_rejected(self):
+  good=ppa_good_status()
+  for output in ('',good+'not a machine status line\n',good.replace('VALIDSIG '+M.PPA_KEY,'VALIDSIG badhex'),
+                 good.replace(' 2026-11-03 1793700000 0 4 ',' 2026-11-03 invalid 0 4 '),
+                 '\n'.join(line for line in good.splitlines() if 'VALIDSIG' not in line)+'\n'):
+   with self.subTest(output=output[-100:]):self.reject(output,0,'')
+ def test_resource_errors_and_unrecognized_stderr_cannot_be_waived(self):
+  good=ppa_good_status();dual=good+ppa_legacy_missing();normal=ppa_dual_stderr()
+  for error in ('gpgv: keyblock resource fixture: No such file or directory\n',
+                'gpgv: keydb_search failed: Invalid packet\n','gpgv: Permission denied\n',
+                'gpgv: [dont know]: invalid packet (ctb=6e)\n','unexpected diagnostic\n'):
+   with self.subTest(error=error):
+    self.reject(dual,2,normal+error)
+    self.reject(good,0,error)
+  self.reject(dual,2,'')
+
+
+class PpaSignatureRealCrypto(unittest.TestCase):
+ """Real RSA fixtures in disposable homes; never read or import any existing key."""
+ @classmethod
+ def setUpClass(cls):
+  cls.tmp=tempfile.TemporaryDirectory(prefix='php85-signature-parser-')
+  cls.addClassCleanup(cls.tmp.cleanup)
+  cls.root=Path(cls.tmp.name);cls.root.chmod(0o700)
+  cls.home=cls.root/'signing';cls.home.mkdir(mode=0o700)
+  cls.verify_home=cls.root/'verify';cls.verify_home.mkdir(mode=0o700)
+  cls.environment=dict(PATH='/usr/bin:/bin',HOME='/nonexistent',GNUPGHOME='/nonexistent',LC_ALL='C',LANG='C')
+  cls.addClassCleanup(lambda:cls.native('gpgconf',cls.home,['--kill','all'],check=False))
+  fingerprints=[]
+  for label in ('current','legacy'):
+   cls.native('gpg',cls.home,['--batch','--pinentry-mode','loopback','--passphrase','',
+    '--quick-generate-key','PHP85 Offline '+label+' <fixture@example.invalid>','rsa2048','sign','0'])
+   listing=cls.native('gpg',cls.home,['--batch','--with-colons','--list-keys']).stdout.decode()
+   fingerprints.append(next(line.split(':')[9] for line in listing.splitlines()
+    if line.startswith('fpr:') and line.split(':')[9] not in fingerprints))
+  cls.current,cls.legacy=fingerprints
+  cls.keyring=cls.verify_home/'current.gpg'
+  cls.keyring.write_bytes(cls.native('gpg',cls.home,['--batch','--export',cls.current]).stdout)
+  cls.release=cls.root/'Release';cls.release.write_bytes(b'Origin: Offline fixture\nCodename: jammy\n')
+  cls.single=cls.root/'InRelease-single';cls.dual=cls.root/'InRelease-dual'
+  frozen=str(int(time.time()))+'!'
+  for path,signers in ((cls.single,[cls.current]),(cls.dual,[cls.current,cls.legacy])):
+   args=['--batch','--yes','--pinentry-mode','loopback','--passphrase','',
+         '--faked-system-time',frozen,'--digest-algo','SHA512']
+   for signer in signers:args+=['--local-user',signer]
+   cls.native('gpg',cls.home,args+['--clearsign','--output',str(path),str(cls.release)])
+ @classmethod
+ def native(cls,binary,home,args,check=True):
+  assert binary in ('gpg','gpgv','gpgconf') and cls.root in home.parents
+  command=['/usr/bin/'+binary]+(['--no-options'] if binary=='gpg' else [])+['--homedir',str(home)]+args
+  result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=cls.environment,timeout=30)
+  if check and result.returncode:raise AssertionError(binary+' fixture failed: '+result.stderr.decode(errors='replace'))
+  return result
+ def verify(self,path):
+  return self.native('gpgv',self.verify_home,['--status-fd=1','--keyring',str(self.keyring),str(path)],check=False)
+ def test_real_current_signature_and_exact_missing_legacy_case(self):
+  with patch.object(M,'PPA_KEY',self.current),patch.object(M,'PPA_LEGACY_KEY',self.legacy):
+   single=self.verify(self.single);self.assertEqual(single.returncode,0)
+   proof=M.ppa_signature_status(single.stdout.decode(),single.returncode,single.stderr.decode())
+   self.assertFalse(proof['missing_legacy_signature'])
+   dual=self.verify(self.dual);self.assertEqual(dual.returncode,2)
+   self.assertIn('[GNUPG:] VALIDSIG '+self.current,dual.stdout.decode())
+   self.assertIn('[GNUPG:] NO_PUBKEY '+self.legacy[-16:],dual.stdout.decode())
+   proof=M.ppa_signature_status(dual.stdout.decode(),dual.returncode,dual.stderr.decode())
+   self.assertTrue(proof['missing_legacy_signature'])
+   self.assertEqual(proof['primary_fingerprint'],self.current)
+ def test_real_tampered_payload_and_unrecognized_second_signer_are_rejected(self):
+  tampered=self.root/'InRelease-tampered'
+  tampered.write_bytes(self.dual.read_bytes().replace(b'Codename: jammy',b'Codename: altered'))
+  with patch.object(M,'PPA_KEY',self.current),patch.object(M,'PPA_LEGACY_KEY',self.legacy):
+   result=self.verify(tampered)
+   self.assertNotEqual(result.returncode,0)
+   with self.assertRaises(M.Hold):M.ppa_signature_status(result.stdout.decode(),result.returncode,result.stderr.decode())
+  result=self.verify(self.dual)
+  with patch.object(M,'PPA_KEY',self.current),patch.object(M,'PPA_LEGACY_KEY','A'*40):
+   with self.assertRaises(M.Hold):M.ppa_signature_status(result.stdout.decode(),result.returncode,result.stderr.decode())
 
 class Files(unittest.TestCase):
  def setUp(self):
@@ -248,13 +420,13 @@ class CommandsAndSignatures(unittest.TestCase):
   raw=b'-----BEGIN PGP SIGNED MESSAGE-----\nOrigin: LP-PPA-ondrej-php\nCodename: jammy\n'
   calls=[]
   def read(path,*args):return raw if str(path).endswith('_InRelease') else b'binary-key'
-  def run(args,**kwargs):calls.append(args);return '[GNUPG:] VALIDSIG '+M.PPA_KEY+' date 1 0 4 0 1 10 01 '+M.PPA_KEY+'\n'
+  def run(args,**kwargs):calls.append(args);return ppa_good_status()
   # Real temporary files only; all crypto commands and privileged file reads mocked.
   factory=tempfile.TemporaryDirectory
   with patch.object(M,'_configured_sources',return_value=([],[entry])),patch.object(M,'safe_file',side_effect=read),patch.object(M,'command',side_effect=run),patch.object(M.tempfile,'TemporaryDirectory',side_effect=lambda **kw:factory(prefix=kw['prefix'])):
    result=M.verify_PPA_signature();self.assertEqual(result[0]['primary_fingerprint'],M.PPA_KEY)
    self.assertEqual(result[0]['path'],'/var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_jammy_InRelease')
-   with patch.object(M,'command',return_value='[GNUPG:] VALIDSIG '+'A'*40+'\n'):
+   with patch.object(M,'command',return_value=ppa_good_status('A'*40)):
     with self.assertRaisesRegex(M.Hold,'fingerprint'):M.verify_PPA_signature()
  def test_unrelated_repo_signature_cannot_satisfy_missing_PPA(self):
   with patch.object(M,'_configured_sources',return_value=([],[])):
@@ -267,7 +439,7 @@ class CommandsAndSignatures(unittest.TestCase):
    entry=dict(base,signed_by=signed);calls=[]
    def run(args,**kwargs):
     calls.append(args)
-    return '[GNUPG:] VALIDSIG '+M.PPA_KEY+' date 1 0 4 0 1 10 01 '+M.PPA_KEY+'\n' if args[0].endswith('gpgv') else ''
+    return ppa_good_status() if args[0].endswith('gpgv') else ''
    def read(path,*args):return release if str(path).endswith('_InRelease') else b'global-key'
    def exists(path):return True if str(path)=='/etc/apt/trusted.gpg' else real_exists(path)
    with self.subTest(inline=bool(signed)),patch.object(M,'_configured_sources',return_value=([],[entry])),patch.object(M,'safe_file',side_effect=read),patch.object(M,'command',side_effect=run),patch.object(M.glob,'glob',return_value=[]),patch.object(Path,'exists',exists),patch.object(M.tempfile,'TemporaryDirectory',side_effect=lambda **kw:factory(prefix=kw['prefix'])):
@@ -280,6 +452,42 @@ class CommandsAndSignatures(unittest.TestCase):
   entry=dict(signed_by='/usr/share/keyrings/ondrej-php.gpg')
   with patch.object(M.glob,'glob',return_value=[]),patch.object(M,'_configured_sources',return_value=(['/etc/apt/sources.list.d/php.sources'],[entry])),patch.object(M,'files_snapshot',side_effect=lambda paths:sorted(set(paths))):
    self.assertEqual(M.source_files(),['/etc/apt/sources.list.d/php.sources','/usr/share/keyrings/ondrej-php.gpg'])
+ def test_command_retains_bounded_gpgv_failure_evidence_without_relaxing_other_failures(self):
+  output=ppa_good_status()+ppa_legacy_missing();stderr=ppa_dual_stderr()
+  result=types.SimpleNamespace(returncode=2,stdout=output.encode(),stderr=stderr.encode())
+  with patch.dict(os.environ,{},clear=True),patch.object(M.subprocess,'run',return_value=result):
+   with self.assertRaisesRegex(M.Hold,'command_failed_gpgv') as caught:M.command(['/usr/bin/gpgv','fixture-only'])
+   self.assertEqual(caught.exception.gpgv_result,dict(returncode=2,stdout=output,stderr=stderr))
+   self.assertEqual(caught.exception.details['exit_code'],2)
+   self.assertIn('VALIDSIG',caught.exception.details['status_codes'])
+   self.assertIn('NO_PUBKEY',caught.exception.details['status_codes'])
+   with self.assertRaisesRegex(M.Hold,'command_failed_fixture') as other:M.command(['/usr/bin/fixture'])
+   self.assertFalse(hasattr(other.exception,'gpgv_result'))
+ def test_signature_verifier_accepts_only_the_structured_exact_gpgv_failure(self):
+  entry=dict(uris=['https://ppa.launchpadcontent.net/ondrej/php/ubuntu'],types=['deb'],suites=['jammy'],
+   signed_by='/usr/share/keyrings/fixture.gpg',source_path='/etc/apt/sources.list.d/php.sources')
+  release=b'Origin: LP-PPA-ondrej-php\nCodename: jammy\n'
+  factory=tempfile.TemporaryDirectory
+  def execute(output=None,code=2,stderr=None,message='command_failed_gpgv',structured=True):
+   error=M.Hold(message)
+   error.details=dict(exit_code=code,status_codes=['fixture'])
+   if structured:error.gpgv_result=dict(returncode=code,stdout=output if output is not None else ppa_good_status()+ppa_legacy_missing(),
+    stderr=stderr if stderr is not None else ppa_dual_stderr())
+   def run(args,**kwargs):
+    self.assertEqual(args[0],'/usr/bin/gpgv')
+    raise error
+   with patch.object(M,'_configured_sources',return_value=([],[entry])), \
+    patch.object(M,'safe_file',side_effect=lambda path,*unused:release if str(path).endswith('_InRelease') else b'public-fixture-key'), \
+    patch.object(M,'command',side_effect=run), \
+    patch.object(M.tempfile,'TemporaryDirectory',side_effect=lambda **kw:factory(prefix=kw['prefix'])):
+    return M.verify_PPA_signature()
+  proof=execute()[0]
+  self.assertEqual(proof['primary_fingerprint'],M.PPA_KEY)
+  self.assertTrue(proof['missing_legacy_signature']);self.assertEqual(proof['gpgv_exit_code'],2)
+  for kwargs in ({'structured':False},{'message':'command_failed_gpg'}, {'code':1},
+                 {'output':ppa_good_status()+ppa_legacy_missing('A'*40)},
+                 {'stderr':ppa_dual_stderr()+'gpgv: keydb_search failed: Invalid packet\n'}):
+   with self.subTest(kwargs=kwargs),self.assertRaises(M.Hold):execute(**kwargs)
 
 class VendorAndUnitGuards(unittest.TestCase):
  def unit(self):

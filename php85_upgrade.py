@@ -20,11 +20,12 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.4'
+VERSION = '1.0.5'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
 PREFLIGHT_V103_SHA256 = 'd6e87c645b9360886d865ba20dda61128e42f96b2b6cd94597e6c257c54af24f'
+PREFLIGHT_V104_SHA256 = '91a9f6ef4805ecafd8b5c0de5fbaae5eb9c4b9fb475b13086c4c3bc36744b70b'
 BASE = Path('/var/lib/ubuntu-php85-upgrade')
 TARGET = '8.5'
 FLOOR = '8.5.12'
@@ -35,6 +36,7 @@ SOCKET = re.compile(r'^/(?:var/)?run/php/[a-zA-Z0-9_.-]+\.sock$')
 PROTECTED = re.compile(r'^(?:nginx|libnginx|apache2|libapache2|mysql|mariadb|percona|postgresql|redis-server|nodejs|libnode|node-|openssh|systemd|linux-|ubuntu-|grub|initramfs|php(?:7\.[234]|8\.[0-4])(?:-|$))')
 PPA_HOSTS = {'ppa.launchpad.net', 'ppa.launchpadcontent.net', 'ppa.setup-php.com'}
 PPA_KEY = 'B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6'
+PPA_LEGACY_KEY = '14AA40EC0831756756D7F66C4F4EA0AAE5267A6C'
 REMOVED_DEFAULTS = {'disable_classes': '', 'track_errors': '0', 'log_errors_max_len': '1024',
     'session.sid_length': '26', 'session.sid_bits_per_character': '5',
     'assert.active': '1', 'assert.warning': '1', 'assert.bail': '0',
@@ -349,8 +351,16 @@ def command(args, timeout=30, env=None, input=None):
                                 timeout=timeout, env=environment)
     except subprocess.TimeoutExpired:
         raise Hold('command_timed_out_' + Path(args[0]).name)
-    need(result.returncode == 0, 'command_failed_' + Path(args[0]).name)
-    need(len(result.stdout) <= 16 * 1024 * 1024, 'command_output_too_large')
+    need(len(result.stdout) <= 16 * 1024 * 1024 and len(result.stderr) <= 16 * 1024 * 1024,
+         'command_output_too_large')
+    if result.returncode != 0:
+        error = Hold('command_failed_' + Path(args[0]).name)
+        if args[0] == '/usr/bin/gpgv':
+            error.gpgv_result = dict(returncode=result.returncode,
+                stdout=result.stdout.decode('utf-8', 'strict'), stderr=result.stderr.decode('utf-8', 'replace'))
+            error.details = dict(exit_code=result.returncode,
+                status_codes=re.findall(r'(?m)^\[GNUPG:\] ([A-Z_]+)(?: |$)', error.gpgv_result['stdout']))
+        raise error
     return result.stdout.decode('utf-8', 'strict')
 
 
@@ -1032,6 +1042,89 @@ def simulated_changes(text, before, cache, host):
     return changes
 
 
+def ppa_signature_status(output, returncode, stderr):
+    """Require a pinned signature; recognize only the known missing legacy co-signature."""
+    reason = 'PHP_PPA_signature_status_rejected'
+    need(returncode in (0, 2), reason)
+    groups = []
+    for line in output.splitlines():
+        fields = line.split()
+        need(len(fields) >= 2 and fields[0] == '[GNUPG:]', reason)
+        code, values = fields[1], fields[2:]
+        if code == 'NEWSIG':
+            groups.append([])
+        else:
+            need(groups and code in ('KEY_CONSIDERED', 'SIG_ID', 'GOODSIG', 'VALIDSIG',
+                'VERIFICATION_COMPLIANCE_MODE', 'ERRSIG', 'NO_PUBKEY'), reason)
+            groups[-1].append((code, values))
+    need(1 <= len(groups) <= 2, reason)
+    good, missing = [], []
+    for group in groups:
+        rows = {}
+        for code, values in group:
+            rows.setdefault(code, []).append(values)
+        if 'ERRSIG' in rows or 'NO_PUBKEY' in rows:
+            need(set(rows) == {'ERRSIG', 'NO_PUBKEY'} and len(rows['ERRSIG']) == len(rows['NO_PUBKEY']) == 1, reason)
+            row = rows['ERRSIG'][0]
+            need(len(row) == 7 and row[0] == PPA_LEGACY_KEY[-16:] and row[1] == '1'
+                 and row[2] in ('8', '9', '10') and row[3] == '01' and row[4].isdigit()
+                 and row[5] == '9' and row[6] == PPA_LEGACY_KEY
+                 and rows['NO_PUBKEY'][0] == [row[0]], reason)
+            missing.append(row)
+            continue
+        need(set(rows) <= {'KEY_CONSIDERED', 'SIG_ID', 'GOODSIG', 'VALIDSIG', 'VERIFICATION_COMPLIANCE_MODE'}
+             and len(rows.get('GOODSIG', [])) == len(rows.get('VALIDSIG', [])) == 1, reason)
+        row = rows['VALIDSIG'][0]
+        need(len(row) in (9, 10) and re.fullmatch(r'[A-F0-9]{40}', row[0]) is not None
+             and re.fullmatch(r'\d{4}-\d{2}-\d{2}', row[1]) is not None
+             and row[2].isdigit() and row[3].isdigit() and row[4:7] == ['4', '0', '1']
+             and row[7] in ('8', '9', '10') and row[8] == '01', reason)
+        primary = row[9] if len(row) == 10 else row[0]
+        need(primary in (PPA_KEY, PPA_LEGACY_KEY), 'PHP_PPA_signature_fingerprint_mismatch')
+        need(rows['GOODSIG'][0] and rows['GOODSIG'][0][0] in (row[0], row[0][-16:]), reason)
+        need(int(row[3]) == 0 or int(row[3]) > int(time.time()), reason)
+        for considered in rows.get('KEY_CONSIDERED', []):
+            need(considered == [primary, '0'], reason)
+        need(len(rows.get('SIG_ID', [])) <= 1 and len(rows.get('VERIFICATION_COMPLIANCE_MODE', [])) <= 1, reason)
+        for identifier in rows.get('SIG_ID', []):
+            need(len(identifier) == 3 and identifier[1:] == row[1:3], reason)
+        for compliance in rows.get('VERIFICATION_COMPLIANCE_MODE', []):
+            need(len(compliance) == 1 and compliance[0].isdigit(), reason)
+        good.append(dict(primary=primary, signer=row[0], timestamp=row[2]))
+    pinned = [row for row in good if row['primary'] == PPA_KEY]
+    need(len(pinned) == 1, 'PHP_PPA_signature_fingerprint_mismatch')
+    need(len({row['primary'] for row in good}) == len(good), reason)
+    compatibility = returncode == 2
+    if compatibility:
+        need(len(groups) == 2 and len(good) == len(missing) == 1
+             and missing[0][4] == pinned[0]['timestamp'], reason)
+    else:
+        need(not missing, reason)
+    # Under LC_ALL=C these are the only benign diagnostics for this bounded
+    # case. Resource/packet/permission errors must never be hidden by a VALIDSIG.
+    if stderr:
+        counts = dict(made=0, using=0, good=0, missing=0)
+        key_ids = {row['signer'] for row in good} | ({PPA_LEGACY_KEY} if missing else set())
+        key_ids |= {key[-16:] for key in key_ids}
+        for line in stderr.splitlines():
+            if re.fullmatch(r'gpgv: Signature made .+', line):
+                counts['made'] += 1
+            elif re.fullmatch(r'gpgv:\s+using RSA key [A-F0-9]+', line):
+                need(line.split()[-1] in key_ids, reason)
+                counts['using'] += 1
+            elif re.fullmatch(r'gpgv: Good signature from ".*"', line):
+                counts['good'] += 1
+            elif line == "gpgv: Can't check signature: No public key":
+                counts['missing'] += 1
+            else:
+                raise Hold(reason)
+        need(counts == dict(made=len(groups), using=len(groups), good=len(good), missing=len(missing)), reason)
+    else:
+        need(not compatibility, reason)
+    return dict(primary_fingerprint=PPA_KEY, signing_fingerprint=pinned[0]['signer'],
+        missing_legacy_signature=compatibility, gpgv_exit_code=returncode)
+
+
 def verify_PPA_signature():
     unused, entries = _configured_sources()
     selected = []
@@ -1084,15 +1177,20 @@ def verify_PPA_signature():
             # Verify the exact bytes whose SHA/Release identity are recorded.
             signed = home / 'InRelease'
             signed.write_bytes(raw)
-            output = command(args + [str(signed)])
-        fingerprints = []
-        for line in output.splitlines():
-            fields = line.split()
-            if len(fields) >= 3 and fields[:2] == ['[GNUPG:]', 'VALIDSIG']:
-                fingerprints.append(fields[-1] if re.fullmatch(r'[0-9A-Fa-f]{40}', fields[-1]) else fields[2])
-        need(PPA_KEY in fingerprints, 'PHP_PPA_signature_fingerprint_mismatch')
+            try:
+                output = command(args + [str(signed)])
+                signature = ppa_signature_status(output, 0, '')
+            except Hold as error:
+                if str(error) != 'command_failed_gpgv' or not hasattr(error, 'gpgv_result'):
+                    raise
+                result = error.gpgv_result
+                try:
+                    signature = ppa_signature_status(result['stdout'], result['returncode'], result['stderr'])
+                except Hold as failure:
+                    failure.details = error.details
+                    raise
         proofs.append(dict(path=str(path), sha256=digest(raw), source_path=entry['source_path'],
-                           primary_fingerprint=PPA_KEY, keyrings=key_proofs))
+                           keyrings=key_proofs, **signature))
     return proofs
 
 
@@ -1377,6 +1475,7 @@ def recover_v100_preflight(previous):
         '1.0.1': (PREFLIGHT_V101_SHA256, 'absolute_nginx_include_required', True),
         '1.0.2': (PREFLIGHT_V102_SHA256, 'Nginx_alias_requires_separate_health_profile', True),
         '1.0.3': (PREFLIGHT_V103_SHA256, 'unsafe_file_parent', True),
+        '1.0.4': (PREFLIGHT_V104_SHA256, 'command_failed_gpgv', True),
     }
     need(previous.get('version') in cases, 'previous_job_preserved_use_status')
     code_sha, reason, has_details = cases[previous['version']]

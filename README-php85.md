@@ -11,6 +11,15 @@ The existing signed PPA metadata is checked against the pinned trusted primary
 key fingerprint; candidate versions and package archives are checked again for
 the sealed transaction.
 
+Version 1.0.5 recognizes one precise dual-signature case. The current pinned
+primary fingerprint `B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6` must have a good,
+strong signature. An aggregate `gpgv` exit status of 2 is admitted only when its
+other signature is the known missing legacy key
+`14AA40EC0831756756D7F66C4F4EA0AAE5267A6C`. The proof records both that aggregate
+status and the missing legacy signer. This does not fetch a key, change trust,
+enable a source or accept arbitrary nonzero verifier results; other signature
+failures still hold.
+
 The active Nginx routes must use local Unix FPM sockets owned by one PHP branch:
 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4 or 8.5. The default CLI must match that
 web branch. A separate dormant PHP 8.5 installation alongside an older active
@@ -91,12 +100,13 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.4 has four narrowly defined automatic preflight recovery cases on the
+Version 1.0.5 has five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
 1.0.2 `Nginx_alias_requires_separate_health_profile` failure, plus the exact
-byte-pinned version 1.0.3 `unsafe_file_parent` failure. Each must match its original core,
+byte-pinned version 1.0.3 `unsafe_file_parent` failure, and the exact byte-pinned
+version 1.0.4 `command_failed_gpgv` failure. Each must match its original core,
 three-event preflight chain and timer evidence, with empty failure details and
 no recovery reference. Eligibility requires no sealed plan or package action
 and restored timer activity. Cached APT indexes may already have been refreshed;
