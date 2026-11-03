@@ -1,0 +1,50 @@
+{
+  "PHP85_updater_version": "1.0.0",
+  "Python_3_10_grammar": true,
+  "bash_syntax": true,
+  "bootstrap_self_tests": "{\"status\": \"bootstrap-fixtures-pass\", \"modes\": 5, \"pipeline_modes\": 2, \"truncation_prefixes\": 106, \"unsafe_environment_rejected\": true, \"minimal_core_environment\": true, \"invalid_option_rejected\": true, \"corrupt_payload_rejected\": true, \"real_core_executed\": false, \"package_actions\": 0, \"service_actions\": 0}",
+  "errors": 0,
+  "failures": 0,
+  "files": {
+    "README-php85.md": "82f4b9db0811670a99bb6bf2554cae2e99fc82c8ecf7777403c03d9ea171e0cf",
+    "build_php85_release.py": "d6f854227e74bd9359c025f3871451da79c1b4f1e0b7ff0a2094826b8f31279d",
+    "php85-packaging-review.json": "6eec5638f4129951a7d5e2e8581d908ed6e383d23fecbb2ff9608509a3fb1e32",
+    "php85.sh": "5cec005445d0dcfbd568d4c42b51c798f56c48294a0e79eedcafea0dc42fdfe8",
+    "php85_runtime.py": "29857391d1637630760351af38a8cffc2ebfd54174532dc5d0e31706fff8fd2c",
+    "php85_upgrade.py": "c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002",
+    "test_php85_runtime.py": "264fa380490edbb8eb290287d6264d0ee971f9d937d02e7e34849dbd6a053201",
+    "test_php85_security.py": "c946a6fa7137f7f18b49b61b6f3294c10491513a9c72f5003626b9bb52a5393a",
+    "test_php85_upgrade.py": "64635723495452af6b54a5789e640e3b20d1eee5db3087a3a0d5ae3460195ac8"
+  },
+  "live_migration_tested": false,
+  "production_execution": false,
+  "review": {
+    "independent_flow_and_fixture_review": true,
+    "runtime_proof_separate_author_and_fixture_tests": true,
+    "security_helper_reviewer_also_authored_scoped_security_helpers": true
+  },
+  "schema": 1,
+  "scope": "native Ubuntu22.04 Nginx/Unix-FPM web runtime and default CLI",
+  "skips": 0,
+  "test_groups": {
+    "test_php85_runtime": {
+      "errors": 0,
+      "failures": 0,
+      "skips": 0,
+      "tests": 12
+    },
+    "test_php85_security": {
+      "errors": 0,
+      "failures": 0,
+      "skips": 0,
+      "tests": 22
+    },
+    "test_php85_upgrade": {
+      "errors": 0,
+      "failures": 0,
+      "skips": 0,
+      "tests": 54
+    }
+  },
+  "tests": 88
+}

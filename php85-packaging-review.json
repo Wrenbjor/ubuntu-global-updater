@@ -1,0 +1,49 @@
+{
+  "actual_APT_or_service_actions": 0,
+  "actual_PHP_or_FPM_executed": false,
+  "artifact_sha256": {
+    "README-php85.md": "82f4b9db0811670a99bb6bf2554cae2e99fc82c8ecf7777403c03d9ea171e0cf",
+    "php85.sh": "5cec005445d0dcfbd568d4c42b51c798f56c48294a0e79eedcafea0dc42fdfe8",
+    "php85_upgrade.py": "c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002"
+  },
+  "bootstrap": {
+    "bytes": 35719,
+    "core_sha256": "c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002",
+    "embedded_payload_verified": true,
+    "production_actions": 0,
+    "shell_sha256": "5cec005445d0dcfbd568d4c42b51c798f56c48294a0e79eedcafea0dc42fdfe8",
+    "status": "built-local-only"
+  },
+  "builder_sha256": "d6f854227e74bd9359c025f3871451da79c1b4f1e0b7ff0a2094826b8f31279d",
+  "checks": {
+    "bash_syntax": true,
+    "compressed_and_payload_SHA256": true,
+    "deterministic_rebuild": true,
+    "emitted_payload_byte_equality": true,
+    "final_completion_token": true,
+    "root_layout_rebuild": true
+  },
+  "core_policy_test_results": "recorded separately by core author and independent reviewer",
+  "fixtures": {
+    "corrupt_payload_rejected": true,
+    "invalid_option_rejected": true,
+    "minimal_core_environment": true,
+    "modes": 5,
+    "package_actions": 0,
+    "pipeline_modes": 2,
+    "real_core_executed": false,
+    "service_actions": 0,
+    "status": "bootstrap-fixtures-pass",
+    "truncation_prefixes": 106,
+    "unsafe_environment_rejected": true
+  },
+  "limits": [
+    "packaging fixtures do not prove application compatibility",
+    "no live PHP migration or package transaction performed in this review"
+  ],
+  "production_connections": 0,
+  "published": false,
+  "review_scope": "local-bootstrap-packaging-only",
+  "schema": 1,
+  "status": "PASS"
+}
