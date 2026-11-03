@@ -93,14 +93,15 @@ the foreground operation. Interruptions and failures require inspection; do not
 repeatedly run an installer to retry an unknown package state.
 Original PHP/Nginx configurations, the sealed plan and recovery metadata are
 retained in root-private job backups under `/var/lib/ubuntu-php85-upgrade`.
-Failed jobs are preserved; the exact preflight exception below is the only
-automatic recovery path. Other failures are not automatically retried.
+Failed jobs are preserved. Only the exact, evidence-bound recovery and
+configuration-continuation exceptions described below run automatically. Other
+failures are not automatically retried.
 When 8.5 is already current and the sealed plan has no package changes, apply
 verifies it without rewriting Nginx, acting on services or changing alternatives.
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.6 retains five narrowly defined automatic preflight recovery cases on the
+Version 1.0.7 retains five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
@@ -182,3 +183,23 @@ this tool does not retire, purge or automatically decommission the old branch.
 
 Local packaging fixtures are not a production migration test. The existing
 global `install.sh` is a separate updater and is not replaced by `php85.sh`.
+
+Version 1.0.7 omits an explicitly disabled `mysqli.reconnect` setting when the
+PHP 8.5 registry no longer defines it. Enabled or unknown values still hold,
+and unrelated removed settings keep their existing checks. Diagnostics identify
+the directive and configuration filenames without printing its value. Both SAPI
+settings and pool directives are validated before target pool, global FPM or
+migration INI files are written.
+
+A separate, one-use v1.0.7 configuration continuation recognizes only the exact
+byte-pinned v1.0.6 migration failure after successful APT installation, accepted
+hook proof and the known disabled `mysqli.reconnect` case. It validates the
+eight-event chain, private package logs, sealed plan, exact post-install package
+table, original source/configuration/health baselines, unchanged old CLI
+selection, inactive target FPM, package-proven target INI defaults and the exact
+partially copied pools/global configuration. Extra target settings or prior
+migration INIs hold. It pauses and restores the recorded timers, preserves the
+old source, plan, backups and failure-pointer bytes, and records a durable
+continuation receipt before configuration writes. It does not rerun APT or
+create a fresh installation job. Interrupted continuation remains blocked for
+inspection; it is not automatically replayed.

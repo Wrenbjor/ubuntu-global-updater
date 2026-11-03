@@ -1,5 +1,5 @@
 """Mock-only PHP85 security tests: no package/service/network commands."""
-import importlib.util,os,stat,sys,tempfile,types,unittest,subprocess,time,contextlib,io
+import importlib,importlib.util,os,stat,sys,tempfile,types,unittest,subprocess,time,contextlib,io
 from pathlib import Path
 from unittest.mock import patch
 SPEC=importlib.util.spec_from_file_location('php85_security_review',Path(__file__).parent/'php85_upgrade.py')
@@ -401,6 +401,87 @@ class AptInstallEvidence(unittest.TestCase):
    finally:
     try:os.close(fd)
     except OSError:pass
+
+
+class ConfigurationContinuationEvidence(unittest.TestCase):
+ """Admission evidence guards on private real files; no native actions allowed."""
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory(prefix='php85-continuation-evidence-')
+  self.root=Path(self.tmp.name);self.root.chmod(0o700)
+  self.base=self.root/'state';self.base.mkdir(mode=0o700)
+  self.job=self.base/'job-20261103T010203Z-0123abcd';self.job.mkdir(mode=0o700)
+  self.receipt=self.base/('configuration-continuation-'+self.job.name+'.json')
+  self.addCleanup(self.tmp.cleanup);self.addCleanup(patch.stopall)
+  patch.object(M,'BASE',self.base).start()
+  patch.object(M,'_SECURITY_ROOT',self.root).start()
+  patch.object(M,'_SECURITY_UID',os.geteuid()).start()
+  self.command=patch.object(M,'command',side_effect=AssertionError('continuation evidence check must not execute commands')).start()
+  self.native=patch.object(M.subprocess,'run',side_effect=AssertionError('continuation evidence check must not run processes')).start()
+  self.atomic=patch.object(M,'atomic',side_effect=AssertionError('continuation evidence check must not repair receipts')).start()
+ def write(self,path,raw=b'{"schema":1,"phase":"started"}\n',mode=0o600):
+  path.write_bytes(raw);path.chmod(mode)
+ def no_actions(self):
+  self.command.assert_not_called();self.native.assert_not_called();self.atomic.assert_not_called()
+ def test_started_receipt_blocks_with_current_present_or_missing_without_repair(self):
+  self.write(self.receipt)
+  for current_exists in (False,True):
+   with self.subTest(current_exists=current_exists):
+    current=self.base/'current.json'
+    if current_exists:self.write(current,b'{"historical":"must stay untouched"}\n')
+    before=self.receipt.read_bytes()
+    with self.assertRaisesRegex(M.Hold,'unfinished_configuration_continuation_preserved'):
+     M.verify_configuration_continuation_journals()
+    self.assertEqual(self.receipt.read_bytes(),before)
+    if current_exists:self.assertEqual(current.read_bytes(),b'{"historical":"must stay untouched"}\n')
+  self.no_actions()
+ def test_nonprivate_or_foreign_owned_receipt_holds_before_native_or_config_work(self):
+  self.write(self.receipt,mode=0o640)
+  with self.assertRaisesRegex(M.Hold,'private_file_required'):M.verify_configuration_continuation_journals()
+  self.receipt.chmod(0o600);real=Path.lstat
+  def foreign(path):
+   observed=real(path)
+   if path!=self.receipt:return observed
+   values={key:getattr(observed,key) for key in dir(observed) if key.startswith('st_')}
+   values['st_uid']=os.geteuid()+1000
+   return types.SimpleNamespace(**values)
+  with patch.object(Path,'lstat',foreign),self.assertRaisesRegex(M.Hold,'unsafe_file_alias_owner'):
+   M.verify_configuration_continuation_journals()
+  self.no_actions()
+ def test_symlinked_or_hardlinked_receipt_never_follows_or_changes_target_evidence(self):
+  target=self.root/'preserved';raw=b'{"schema":1,"phase":"started"}\n';self.write(target,raw)
+  self.receipt.symlink_to(target)
+  with self.assertRaisesRegex(M.Hold,'private_file_symlink'):M.verify_configuration_continuation_journals()
+  self.assertEqual(target.read_bytes(),raw);self.receipt.unlink()
+  os.link(target,self.receipt)
+  with self.assertRaisesRegex(M.Hold,'unsafe_file'):M.verify_configuration_continuation_journals()
+  self.assertEqual(target.read_bytes(),raw);self.no_actions()
+ def test_duplicate_json_keys_cannot_hide_an_incomplete_continuation(self):
+  raw=b'{"schema":1,"phase":"started","phase":"complete"}\n';self.write(self.receipt,raw)
+  with self.assertRaisesRegex(M.Hold,'duplicate_preinstall_JSON_key'):M.verify_configuration_continuation_journals()
+  self.assertEqual(self.receipt.read_bytes(),raw);self.no_actions()
+ def test_nonprivate_or_symlinked_old_job_is_rejected_before_reading_or_applying_a_plan(self):
+  previous=dict(version='1.0.6',job=str(self.job),phase='failed_needs_review',event_sha256='0'*64,
+   reason='removed_nondefault_INI_setting',details={},recovery=str(self.job/'recovery.json'))
+  self.job.chmod(0o750)
+  with self.assertRaisesRegex(M.Hold,'unsafe_preinstall_job'):M.continue_v106_configuration(previous)
+  self.job.chmod(0o700);self.job.rename(self.base/'original-private-job')
+  self.job.symlink_to(self.base/'original-private-job',target_is_directory=True)
+  with self.assertRaisesRegex(M.Hold,'unsafe_preinstall_job'):M.continue_v106_configuration(previous)
+  self.no_actions()
+ def test_failure_to_save_original_current_leaves_old_current_and_event_bytes_untouched(self):
+  # Reuse the integrated fixture's fake filesystem/endpoints; production core
+  # admission and exception handling execute, while its one targeted write fails.
+  fixtures=importlib.import_module('test_php85_upgrade')
+  case=fixtures.ApplyFixtures('test_exact_v106_successful_APT_continues_configuration_without_APT_replay')
+  case.setUp();self.addCleanup(case.doCleanups)
+  result=case.run_apply(previous_configuration=True,continuation_mutation='save-current-failure')
+  self.assertIsNotNone(result['error'])
+  self.assertEqual(result['continuation_receipts'][0]['phase'],'started')
+  self.assertEqual(result['current'],M.json.loads(result['previous_bytes']))
+  self.assertEqual(result['preserved_previous']['events.jsonl'],result['previous_files']['events.jsonl'])
+  self.assertNotIn('configuration-continuation-original-current.json',result['preserved_previous'])
+  self.assertFalse(any(args[0]=='/usr/bin/apt-get' for args in result['commands']))
+  self.assertEqual(result['final_site'],result['original_site'])
 
 
 class Files(unittest.TestCase):

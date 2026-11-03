@@ -20,7 +20,7 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.6'
+VERSION = '1.0.7'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
@@ -928,7 +928,15 @@ def ini_output(old, target, settings_files):
             continue
         value = str(old['ini'][key]) if old['ini'][key] is not None else ''
         if key not in target_keys:
-            need(key in REMOVED_DEFAULTS and value == REMOVED_DEFAULTS[key], 'removed_nondefault_INI_setting')
+            # mysqli.reconnect defaulted to Off and was removed in PHP 8.2.
+            # Normalize only this reviewed false value; never drop ON/unknown settings.
+            removed_false = (key == 'mysqli.reconnect' and
+                             value.strip().lower() in ('', '0', 'off', 'false', 'no', 'none'))
+            if not (removed_false or key in REMOVED_DEFAULTS and value == REMOVED_DEFAULTS[key]):
+                error = Hold('removed_nondefault_INI_setting')
+                error.details = dict(directive=key, files=sorted(path for path, text in settings_files.items()
+                    if re.search(r'(?m)^\s*' + re.escape(key) + r'\s*=', text)))
+                raise error
             continue
         need(not re.search(r'(?:/php/(?:7\.[234]|8\.[0-4])|/php(?:7\.[234]|8\.[0-4])|/20[0-9]{6}/)', value), 'legacy_PHP_path_in_setting')
         need('\n' not in value and '\r' not in value and '\x00' not in value, 'multiline_INI_value')
@@ -1923,6 +1931,455 @@ def rollback():
             os.close(shared)
 
 
+CONTINUATION_V106_SHA256 = '09ea4c451a7bcd5aa4248aded6e5dabefae1b54c602f3dd49ed02ad73245d80f'
+
+
+def _configuration_vendor_profiles(profiles, after):
+    """Admit only freshly installed, package-proven default target INI bytes."""
+    inventory = {}
+    for package in sorted(after):
+        if package.startswith('php8.5-'):
+            paths = command(['/usr/bin/dpkg-query', '-L', package]).splitlines()
+            for path in paths:
+                if path.startswith('/') and (path.endswith('.ini') or '/php.ini-production' in path):
+                    inventory.setdefault(path, []).append(package)
+    verified = {}
+    def vendor(path):
+        if path not in verified:
+            owners = inventory.get(path, [])
+            need(len(owners) == 1, 'configuration_continuation_INI_template_owner_ambiguous')
+            installed_vendor_file(owners[0], path)
+            verified[path] = safe_file(path)
+        return verified[path]
+    for sapi, settings in profiles.items():
+        seen_modules = set()
+        template = '/usr/lib/php/8.5/php.ini-production' + ('.cli' if sapi == 'cli' else '')
+        need(settings['/etc/php/8.5/' + sapi + '/php.ini'].encode() == vendor(template),
+             'configuration_continuation_target_php_ini_not_vendor_default')
+        for path, text in settings.items():
+            if path.endswith('/php.ini'):
+                continue
+            logical = Path(path)
+            need(logical.is_symlink(), 'configuration_continuation_extra_target_INI')
+            resolved = logical.resolve(strict=True)
+            need(resolved.parent == Path('/etc/php/8.5/mods-available')
+                 and re.fullmatch(r'[A-Za-z0-9_-]+\.ini', resolved.name),
+                 'configuration_continuation_nonstandard_target_INI_alias')
+            raw = safe_file(logical)
+            need(raw == text.encode(), 'configuration_continuation_target_INI_changed')
+            candidates = [p for p in inventory if Path(p).name == resolved.name
+                          and re.match(r'^/usr/share/php8\.5-[A-Za-z0-9+.-]+/', p)]
+            matches = [p for p in candidates if vendor(p) == raw]
+            need(len(matches) == 1, 'configuration_continuation_target_INI_not_unique_vendor_template')
+            # Match php-common's get_priority/get_live_link convention exactly.
+            priorities = re.findall(r'(?m)^;[ \t]*priority[ \t]*=[ \t]*([0-9]+)[ \t]*$', text)
+            need(len(priorities) <= 1, 'configuration_continuation_INI_priority_ambiguous')
+            priority = priorities[0] if priorities else '20'
+            need(logical.name == priority + '-' + resolved.name and str(resolved) not in seen_modules,
+                 'configuration_continuation_extra_or_reordered_target_INI')
+            seen_modules.add(str(resolved))
+
+
+def _configuration_selectors(values, modes):
+    allowed = {'php', 'phar', 'phar.phar', 'phpize', 'php-config'}
+    need(isinstance(values, dict) and set(values) == set(modes)
+         and 'php' in values and set(values) <= allowed,
+         'configuration_continuation_selector_receipts_changed')
+    selected = {}
+    for line in command(['/usr/bin/update-alternatives', '--get-selections']).splitlines():
+        fields = line.split()
+        if fields and fields[0] in allowed:
+            need(len(fields) == 3 and fields[0] not in selected,
+                 'configuration_continuation_selector_inventory_changed')
+            selected[fields[0]] = fields
+    need(set(selected) == set(values), 'configuration_continuation_selector_inventory_changed')
+    observed = {}
+    for name in sorted(values):
+        need(modes[name] in ('auto', 'manual') and re.fullmatch(r'/usr/bin/[A-Za-z0-9.+_-]+', values[name]),
+             'configuration_continuation_selector_receipt_invalid')
+        row = _preinstall_fields(command(['/usr/bin/update-alternatives', '--query', name]))
+        need(row['Name'] == name and row['Status'] == 'manual' and row['Value'] == values[name]
+             and selected[name][1:] == ['manual', values[name]],
+             'configuration_continuation_selector_changed')
+        # The approved new packages may legitimately change Best to 8.5.
+        need(values[name] == '/usr/bin/' + name + '7.4'
+             and row['Best'] in (values[name], '/usr/bin/' + name + '8.5'),
+             'configuration_continuation_selector_best_unapproved')
+        observed[name] = row
+    return observed
+
+
+def _configuration_after(plan):
+    expected = {name: dict(row) for name, row in plan['packages'].items()}
+    for name, row in plan['changes'].items():
+        expected[name] = dict(version=row['version'], architecture=row['architecture'])
+    need(packages() == expected, 'configuration_continuation_package_table_changed')
+    installed = {}
+    raw = command(['/usr/bin/dpkg-query', '-W', '-f=${binary:Package}\t${Version}\t${Architecture}\t${db:Status-Abbrev}\n'])
+    for line in raw.splitlines():
+        fields = line.split('\t')
+        need(len(fields) == 4, 'configuration_continuation_package_query_malformed')
+        name, version, architecture, status = fields
+        if ':' in name:
+            name, suffix = name.rsplit(':', 1)
+            need(suffix == architecture, 'configuration_continuation_package_architecture_changed')
+        if status.strip().startswith('rc') or status.strip() in ('un', 'pn'):
+            continue
+        need(status.strip() == 'ii' and name not in installed
+             and re.fullmatch(r'[a-z0-9][a-z0-9+.-]*', name),
+             'configuration_continuation_package_status_changed')
+        installed[name] = dict(version=version, architecture=architecture)
+    need(installed == expected, 'configuration_continuation_full_package_table_changed')
+    return expected
+
+
+def _configuration_partial(plan, job, after, timers, values, modes):
+    need(identity() == plan['host'] and source_files() == plan['sources'],
+         'configuration_continuation_host_or_sources_changed')
+    need(files_snapshot(plan['files']) == plan['files'], 'configuration_continuation_source_configuration_changed')
+    branch = plan['source_branch']
+    need(Path('/usr/bin/php').resolve() == Path('/usr/bin/php' + branch).resolve(),
+         'configuration_continuation_default_CLI_changed')
+    need(not Path('/usr/sbin/policy-rc.d').exists() and not Path('/usr/sbin/policy-rc.d').is_symlink(),
+         'configuration_continuation_service_policy_present')
+    validate_loaders(branch, plan['INI_files'], after)
+    need(registry(branch) == plan['source_CLI_registry'] and registry(branch, True) == plan['source_registry'],
+         'configuration_continuation_source_registry_changed')
+    source_unit = validate_native_unit(branch, True)
+    need(source_unit in plan['files'] and unit_enabled(branch) is plan['source_enabled'],
+         'configuration_continuation_source_unit_changed')
+    runtime = _preinstall_runtime(branch)
+    _preinstall_timers(timers)
+    selectors = _configuration_selectors(values, modes)
+    target_unit = validate_native_unit(TARGET)
+    state = command(['/bin/systemctl', 'show', 'php8.5-fpm.service', '-p', 'ActiveState', '--value']).strip()
+    pid = command(['/bin/systemctl', 'show', 'php8.5-fpm.service', '-p', 'MainPID', '--value']).strip()
+    need(state == 'inactive' and pid == '0', 'configuration_continuation_target_not_inactive')
+    profiles = {}
+    for sapi in ('cli', 'fpm'):
+        migration = Path('/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini')
+        need(not migration.exists() and not migration.is_symlink(), 'configuration_continuation_INI_already_written')
+        paths = ['/etc/php/8.5/' + sapi + '/php.ini'] + sorted(glob.glob('/etc/php/8.5/' + sapi + '/conf.d/*.ini'))
+        profiles[sapi] = {path: safe_file(path).decode() for path in paths}
+        executable_INI_guard(profiles[sapi])
+    _configuration_vendor_profiles(profiles, after)
+    validate_loaders(TARGET, profiles, after)
+    target_fpm, target_cli = registry(TARGET, True), registry(TARGET, False)
+    need(compare(target_fpm['version'], FLOOR) >= 0 and compare(target_cli['version'], FLOOR) >= 0,
+         'configuration_continuation_target_below_floor')
+    for sapi, old, target in (('fpm', plan['source_registry'], target_fpm),
+                             ('cli', plan['source_CLI_registry'], target_cli)):
+        need({'mysqli', 'mysqlnd'} <= {name.lower() for name in old['modules']}
+             and str(old['ini'].get('mysqli.reconnect', '')).strip().lower() in ('', '0', 'off', 'false', 'no')
+             and 'mysqli.reconnect' in old['ini'] and 'mysqli.reconnect' not in target['ini'],
+             'configuration_continuation_not_known_mysqli_OFF_case')
+        ini_output(old, target, plan['INI_files'][sapi])
+    directory = Path('/etc/php/8.5/fpm/pool.d')
+    outputs = pool_outputs(plan['pools'], plan['parsed_pools'], plan['socket_map'])
+    distribution = 'www.conf.distribution-' + job.name
+    need({p.name for p in directory.iterdir()} == set(outputs) | {distribution},
+         'configuration_continuation_target_pool_inventory_changed')
+    partial_paths = []
+    for name, content in outputs.items():
+        path = directory / name
+        before = plan['files'][next(p for p in plan['pools'] if Path(p).name == name)]
+        row = files_snapshot([str(path)])[str(path)]
+        need(row['link'] is None and safe_file(path) == content.encode()
+             and all(row[key] == before[key] for key in ('mode', 'uid', 'gid')),
+             'configuration_continuation_partial_pool_changed')
+        partial_paths.append(str(path))
+    global_path = '/etc/php/8.5/fpm/php-fpm.conf'
+    before = plan['files']['/etc/php/' + branch + '/fpm/php-fpm.conf']
+    row = files_snapshot([global_path])[global_path]
+    need(row['link'] is None and safe_file(global_path) == plan['target_global_FPM'].encode()
+         and all(row[key] == before[key] for key in ('mode', 'uid', 'gid')),
+         'configuration_continuation_partial_global_changed')
+    need(not (directory / distribution).is_symlink()
+         and safe_file(directory / distribution) == safe_file(job / 'target-default-www.conf', True),
+         'configuration_continuation_default_pool_backup_changed')
+    safe_file(job / 'target-default-global.conf', True)
+    partial_paths += [global_path, str(directory / distribution), target_unit]
+    for settings in profiles.values():
+        partial_paths.extend(settings)
+    health(plan['nginx']['health'])
+    return dict(runtime=runtime, selectors=selectors, target_files=files_snapshot(partial_paths))
+
+
+def verify_configuration_continuation_journals():
+    for path in BASE.glob('configuration-continuation-*.json'):
+        receipt = _preinstall_json(path)
+        need(receipt.get('schema') == 1 and receipt.get('phase') == 'complete',
+             'unfinished_configuration_continuation_preserved')
+        job = Path(receipt.get('job', ''))
+        _preinstall_job(job)
+        need(path.name == 'configuration-continuation-' + job.name + '.json', 'invalid_configuration_continuation_receipt')
+        for name, sha in receipt['original_files'].items():
+            raw = safe_file(job / name, True)
+            if name == 'events.jsonl':
+                raw = raw[:receipt['original_event_bytes']]
+            need(digest(raw) == sha, 'configuration_continuation_original_evidence_changed')
+        need(digest(safe_file(job / 'configuration-continuation-original-current.json', True)) == receipt['original_current_sha256'],
+             'configuration_continuation_original_current_changed')
+        need(digest(safe_file(job / 'configuration-continuation-source.py', True)) == receipt['continuation_source_sha256'],
+             'configuration_continuation_source_changed')
+
+
+def continue_v106_configuration(previous):
+    need(set(previous) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'details', 'recovery'}
+         and previous['version'] == '1.0.6' and previous['phase'] == 'failed_needs_review'
+         and previous['reason'] == 'removed_nondefault_INI_setting' and previous['details'] == {},
+         'previous_configuration_job_requires_review')
+    job = Path(previous['job'])
+    _preinstall_job(job)
+    need(previous['recovery'] == str(job / 'recovery.json'), 'configuration_continuation_recovery_pointer_changed')
+    raw_current = safe_file(BASE / 'current.json', True)
+    need(_preinstall_json(BASE / 'current.json') == previous, 'configuration_continuation_current_changed')
+    plan_raw, plan = safe_file(job / 'plan.json', True), _preinstall_json(job / 'plan.json')
+    need(plan.get('schema') == 1 and plan.get('version') == '1.0.6'
+         and plan.get('code_sha256') == CONTINUATION_V106_SHA256
+         and digest(safe_file(job / 'php85_upgrade.py', True)) == CONTINUATION_V106_SHA256
+         and plan.get('mode') == 'migration' and plan.get('source_branch') == '7.4'
+         and plan.get('changes'), 'configuration_continuation_unrecognized_source_or_plan')
+    need(plan_raw == encoded(plan) and safe_file(job / 'plan.sha256', True).decode() == digest(plan_raw) + '\n',
+         'configuration_continuation_plan_seal_changed')
+    names = {'php85_upgrade.py', 'events.jsonl', 'timers.json', 'plan.json', 'plan.sha256', 'recovery.json',
+             'alternatives.json', 'alternative-modes.json', 'apt-hook', 'hook-accepted.json',
+             'apt-install.stdout', 'apt-install.stderr', 'target-default-www.conf', 'target-default-global.conf'}
+    names.update('configuration-' + str(i) for i in range(len(plan['files'])))
+    need({p.name for p in job.iterdir()} == names, 'configuration_continuation_unrecognized_artifacts')
+    original_files = _preinstall_inventory(job)
+    for i, (path, row) in enumerate(sorted(plan['files'].items())):
+        need(digest(safe_file(job / ('configuration-' + str(i)), True)) == row['sha256'],
+             'configuration_continuation_backup_changed')
+    recovery = _preinstall_json(job / 'recovery.json')
+    need(set(recovery) == {'files', 'old_service', 'old_cli'} and recovery['files'] == plan['files']
+         and recovery['old_service'] == 'php7.4-fpm.service', 'configuration_continuation_recovery_changed')
+    values, modes = _preinstall_json(job / 'alternatives.json'), _preinstall_json(job / 'alternative-modes.json')
+    old_cli = _preinstall_fields(recovery['old_cli'])
+    need(old_cli['Name'] == 'php' and old_cli['Value'] == values.get('php') and old_cli['Status'] == modes.get('php'),
+         'configuration_continuation_CLI_receipts_disagree')
+    events_raw = safe_file(job / 'events.jsonl', True)
+    events, last = [], '0' * 64
+    for raw in events_raw.splitlines(keepends=True):
+        row = json.loads(raw, object_pairs_hook=_preinstall_object)
+        need(row.get('previous_sha256') == last and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', row.get('time', '')),
+             'configuration_continuation_event_chain_changed')
+        events.append(row)
+        last = digest(raw)
+    need([r.get('phase') for r in events] == ['preflight', 'refreshing_indexes', 'plan_sealed', 'downloading_packages',
+         'installing_packages', 'APT_install_exited', 'target_configuration', 'failed_needs_review'],
+         'configuration_continuation_unexpected_stages')
+    common = {'time', 'phase', 'previous_sha256'}
+    need(all(set(events[i]) == common for i in (0, 1, 3, 4, 6))
+         and set(events[2]) == common | {'source', 'target', 'changed_packages', 'plan_sha256'}
+         and events[2]['source'] == '7.4' and events[2]['target'] == '8.5'
+         and events[2]['changed_packages'] == sorted(plan['changes']) and events[2]['plan_sha256'] == digest(plan_raw)
+         and set(events[5]) == common | {'exit_code', 'logs'} and events[5]['exit_code'] == 0
+         and set(events[7]) == common | {'reason', 'details', 'recovery'}
+         and all(events[7][k] == previous[k] for k in ('reason', 'details', 'recovery'))
+         and previous['event_sha256'] == last, 'configuration_continuation_event_or_current_changed')
+    logs = []
+    for name in ('apt-install.stdout', 'apt-install.stderr'):
+        raw = safe_file(job / name, True)
+        logs.append(dict(path=str(job / name), sha256=digest(raw), bytes=len(raw)))
+    need(events[5]['logs'] == logs and _preinstall_json(job / 'hook-accepted.json') ==
+         dict(accepted=True, plan_sha256=digest(plan_raw)), 'configuration_continuation_APT_proof_changed')
+    expected_hook = ('#!/bin/sh\nexec /usr/bin/python3 -I ' + str(job / 'php85_upgrade.py') +
+                     ' --apt-hook ' + str(job / 'plan.json') + '\n').encode()
+    need(safe_file(job / 'apt-hook', True) == expected_hook and stat.S_IMODE((job / 'apt-hook').stat().st_mode) == 0o700,
+         'configuration_continuation_APT_hook_changed')
+    receipt_path = BASE / ('configuration-continuation-' + job.name + '.json')
+    saved_current = job / 'configuration-continuation-original-current.json'
+    need(not receipt_path.exists() and not receipt_path.is_symlink() and not saved_current.exists()
+         and not saved_current.is_symlink(), 'configuration_continuation_already_attempted')
+    shared, held, paused, journal = None, [], False, None
+    receipt, original_current_saved = None, False
+    try:
+        shared = shared_lock()
+        held = package_locks()
+        timers = _preinstall_json(job / 'timers.json')
+        after = _configuration_after(plan)
+        proof = _configuration_partial(plan, job, after, timers, values, modes)
+        need(_preinstall_inventory(job) == original_files and safe_file(BASE / 'current.json', True) == raw_current,
+             'configuration_continuation_evidence_changed')
+        continuation_source = safe_file(__file__)
+        receipt = dict(schema=1, phase='started', job=str(job), original_files=original_files,
+            original_event_bytes=len(events_raw), original_current_sha256=digest(raw_current),
+            original_source_sha256=CONTINUATION_V106_SHA256, continuation_source_sha256=digest(continuation_source),
+            plan_sha256=digest(plan_raw), prior_APT_succeeded=True, replay_APT=False,
+            cause_basis='removed_mysqli_reconnect_confirmed_OFF_configuration_only', before=proof,
+            time=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        atomic(receipt_path, encoded(receipt))
+        atomic(saved_current, raw_current)
+        need(safe_file(saved_current, True) == raw_current,
+             'configuration_continuation_current_backup_changed')
+        original_current_saved = True
+        atomic(job / 'configuration-continuation-source.py', continuation_source)
+        paused = True
+        if timers:
+            command(['/bin/systemctl', 'stop'] + timers)
+        # Recheck immediately after durable one-use admission, before config mutation.
+        need(_configuration_after(plan) == after and _configuration_partial(plan, job, after, [], values, modes) == proof
+             and safe_file(BASE / 'current.json', True) == raw_current,
+             'configuration_continuation_baseline_changed_after_admission')
+        need(all(digest(safe_file(job / name, True)) == sha for name, sha in original_files.items()),
+             'configuration_continuation_original_evidence_changed_after_admission')
+        journal = Journal(job)
+        journal.phase('configuration_only_continuation', original_version='1.0.6', plan_sha256=digest(plan_raw), APT_replayed=False)
+        finish_configuration(plan, job, journal, values, modes, after, prepared=True)
+        if timers:
+            command(['/bin/systemctl', 'start'] + timers)
+        _preinstall_timers(timers)
+        paused = False
+        receipt['phase'] = 'complete'
+        receipt['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        atomic(receipt_path, encoded(receipt))
+        return dict(phase='configuration_continuation_complete', job=str(job), APT_replayed=False)
+    except BaseException as error:
+        if receipt is not None and original_current_saved:
+            journal = journal or Journal(job)
+            journal.phase('configuration_continuation_failed_needs_review',
+                          reason=str(error) if isinstance(error, Hold) else type(error).__name__,
+                          recovery=str(job / 'recovery.json'), continuation_receipt=str(receipt_path))
+        raise
+    finally:
+        try:
+            if paused:
+                if timers:
+                    command(['/bin/systemctl', 'start'] + timers)
+                _preinstall_timers(timers)
+        finally:
+            for fd in reversed(held):
+                os.close(fd)
+            if shared is not None:
+                os.close(shared)
+
+
+def finish_configuration(plan, job, journal, alternatives, alternative_modes, after, prepared=False):
+    journal.phase('target_configuration')
+    target_profiles = {}
+    for sapi in ('cli', 'fpm'):
+        paths = ['/etc/php/8.5/' + sapi + '/php.ini']
+        paths += sorted(glob.glob('/etc/php/8.5/' + sapi + '/conf.d/*.ini'))
+        target_profiles[sapi] = {path: safe_file(path).decode() for path in paths}
+        executable_INI_guard(target_profiles[sapi])
+    validate_loaders(TARGET, target_profiles, after)
+    validate_native_unit(TARGET)
+    target = registry(TARGET, True)
+    target_cli = registry(TARGET, False)
+    need(compare(target['version'], FLOOR) >= 0, 'target_runtime_below_security_floor')
+    if plan['mode'] == 'migration':
+        need(files_snapshot(plan['files']) == plan['files'], 'source_configuration_changed')
+        rendered_pools = pool_outputs(plan['pools'], plan['parsed_pools'], plan['socket_map'])
+        rendered_ini, ini_metadata = {}, {}
+        for sapi, old_registry, target_registry in (
+            ('fpm', plan['source_registry'], target), ('cli', plan['source_CLI_registry'], target_cli)):
+            settings = plan['INI_files'][sapi]
+            rendered_ini[sapi] = ini_output(old_registry, target_registry, settings).encode()
+            ini_metadata[sapi] = merged_mode([plan['files'][path] for path in settings])
+        for text in plan['pools'].values():
+            for key in re.findall(r'(?m)^\s*php_(?:admin_)?(?:value|flag)\[([^\]]+)\]\s*=', text):
+                need(key in target['ini'], 'unsupported_forwarded_pool_INI_setting')
+        for sapi in ('fpm', 'cli'):
+            destination = Path('/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini')
+            need(not destination.exists() and not destination.is_symlink(), 'migration_INI_destination_already_exists')
+        target_dir = Path('/etc/php/8.5/fpm/pool.d')
+        pool_metadata = {name: plan['files'][next(path for path in plan['pools'] if Path(path).name == name)]
+                         for name in rendered_pools}
+        global_record = plan['files']['/etc/php/' + plan['source_branch'] + '/fpm/php-fpm.conf']
+        global_path = Path('/etc/php/8.5/fpm/php-fpm.conf')
+        if not prepared:
+            need(sorted(p.name for p in target_dir.glob('*.conf')) == ['www.conf'], 'unexpected_target_pools')
+            need(not (job / 'target-default-www.conf').exists() and
+                 not (job / 'target-default-global.conf').exists() and
+                 not (target_dir / ('www.conf.distribution-' + job.name)).exists(), 'target_defaults_already_archived')
+            default_www = safe_file(target_dir / 'www.conf')
+            default_global = safe_file(global_path)
+            atomic(job / 'target-default-www.conf', default_www)
+            # Archive rather than delete the distribution's unused default pool.
+            (target_dir / 'www.conf').rename(target_dir / ('www.conf.distribution-' + job.name))
+        for name, content in rendered_pools.items():
+            record = pool_metadata[name]
+            atomic(target_dir / name, content.encode(), record['mode'])
+            os.chown(target_dir / name, record['uid'], record['gid'])
+        if not prepared:
+            atomic(job / 'target-default-global.conf', default_global)
+        record = global_record
+        atomic(global_path, plan['target_global_FPM'].encode(), record['mode'])
+        os.chown(global_path, record['uid'], record['gid'])
+        for sapi, old_registry, target_registry in (
+            ('fpm', plan['source_registry'], target), ('cli', plan['source_CLI_registry'], target_cli)):
+            settings = plan['INI_files'][sapi]
+            mode, gid = ini_metadata[sapi]
+            path = Path('/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini')
+            atomic(path, rendered_ini[sapi], mode)
+            os.chown(path, 0, gid)
+        for sapi, old_registry, target_registry in (
+            ('fpm', plan['source_registry'], target), ('cli', plan['source_CLI_registry'], target_cli)):
+            current = registry(TARGET, sapi == 'fpm')
+            expected = forwarded_values(old_registry, target_registry, plan['INI_files'][sapi])
+            need(all(current['ini'].get(key) == value for key, value in expected.items()), 'forwarded_INI_effective_value_mismatch')
+            need({x.lower() for x in old_registry['modules']} <= {x.lower() for x in current['modules']}, 'forwarded_extension_parity_failed')
+    else:
+        for sapi, baseline, observed in (('fpm', plan['source_registry'], target),
+                                          ('cli', plan['source_CLI_registry'], target_cli)):
+            expected = forwarded_values(baseline, observed, plan['INI_files'][sapi])
+            need(all(observed['ini'].get(key) == value for key, value in expected.items()), 'patched_INI_effective_value_drift')
+            need({x.lower() for x in baseline['modules']} <= {x.lower() for x in observed['modules']}, 'patched_extension_parity_failed')
+    command(['/usr/sbin/php-fpm8.5', '-t'])
+    if plan['mode'] == 'migration':
+        command(['/bin/systemctl', 'enable' if plan['source_enabled'] else 'disable', 'php8.5-fpm.service'])
+    if plan['mode'] == 'migration' or plan['changes']:
+        command(['/bin/systemctl', 'restart', 'php8.5-fpm.service'], 90)
+    runtime_proof = fpm_ready(plan['socket_map'].values())
+    atomic(job / 'runtime-before-cutover.json', encoded(runtime_proof))
+    if plan['mode'] == 'migration':
+        # Recheck complete Nginx source graph before committing exact operand edits.
+        need(files_snapshot(plan['nginx']['files']) == {p: plan['files'][p] for p in plan['nginx']['files']}, 'Nginx_configuration_drift')
+        journal.phase('Nginx_cutover')
+        outputs = route_outputs(plan['nginx']['files'], plan['nginx']['routes'], plan['socket_map'])
+        atomic(job / 'owned-Nginx-edits.json', encoded({path: digest(text.encode()) for path, text in outputs.items()}))
+        for path, text in outputs.items():
+            p = Path(path).resolve()
+            record = plan['files'][path]
+            atomic(p, text.encode(), record['mode'])
+            os.chown(p, record['uid'], record['gid'])
+        command(['/usr/sbin/nginx', '-t'])
+        command(['/bin/systemctl', 'reload', 'nginx.service'])
+    journal.phase('web_verification')
+    for attempt in range(3):
+        time.sleep(2)
+        try:
+            health(plan['nginx']['health'])
+            break
+        except Hold:
+            if attempt == 2:
+                raise
+    atomic(job / 'runtime-after-cutover.json', encoded(fpm_ready(plan['socket_map'].values())))
+    final_nginx = nginx_inventory()
+    expected_routes = {plan['socket_map'][row['socket']] for row in plan['nginx']['routes']}
+    need({r['socket'] for r in final_nginx['routes']} == expected_routes, 'final_Nginx_socket_mismatch')
+    if plan['mode'] == 'migration':
+        for name in alternatives:
+            target_path = '/usr/bin/' + name + TARGET
+            if Path(target_path).is_file():
+                command(['/usr/bin/update-alternatives', '--set', name, target_path])
+    elif plan['changes']:
+        for name, mode in alternative_modes.items():
+            if mode == 'auto':
+                command(['/usr/bin/update-alternatives', '--auto', name])
+                selected = command(['/usr/bin/update-alternatives', '--query', name])
+                need(re.search(r'^Value: (.+)$', selected, re.M)[1] == alternatives[name], 'automatic_selector_drift')
+    need(command(['/usr/bin/php', '-n', '-r', 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;']).strip() == TARGET, 'default_CLI_not_8_5')
+    atomic(job / 'verification.json', encoded(dict(PHP_version=target['version'],
+           target_packages={name: after[name] for name in plan['target_records']},
+           Nginx_sockets=sorted(plan['socket_map'].values()), web_smoke_checks=True,
+           application_compatibility_claim=False, legacy_packages_preserved=True,
+           scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False)))
+    journal.phase('complete', PHP_version=target['version'], legacy_retirement_required=plan['mode'] == 'migration',
+                  scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False)
+
+
 def apply():
     need(os.geteuid() == 0, 'root_required')
     identity()
@@ -1935,9 +2392,13 @@ def apply():
             raise Hold('another_PHP85_job_is_running')
         verify_preflight_archive_journals()
         verify_preinstall_recovery_journals()
+        verify_configuration_continuation_journals()
         if (BASE / 'current.json').exists():
             previous = json.loads(safe_file(BASE / 'current.json', True))
             if previous.get('phase') != 'complete':
+                if previous.get('version') == '1.0.6':
+                    print(json.dumps(continue_v106_configuration(previous)), flush=True)
+                    return
                 if previous.get('version') == '1.0.5':
                     recovered = recover_v105_preinstall(previous)
                     print(json.dumps(recovered), flush=True)
@@ -2035,109 +2496,7 @@ def apply():
             if plan['mode'] == 'migration' or plan['changes']:
                 for name, value in alternatives.items():
                     command(['/usr/bin/update-alternatives', '--set', name, value])
-            journal.phase('target_configuration')
-            target_profiles = {}
-            for sapi in ('cli', 'fpm'):
-                paths = ['/etc/php/8.5/' + sapi + '/php.ini']
-                paths += sorted(glob.glob('/etc/php/8.5/' + sapi + '/conf.d/*.ini'))
-                target_profiles[sapi] = {path: safe_file(path).decode() for path in paths}
-                executable_INI_guard(target_profiles[sapi])
-            validate_loaders(TARGET, target_profiles, after)
-            validate_native_unit(TARGET)
-            target = registry(TARGET, True)
-            target_cli = registry(TARGET, False)
-            need(compare(target['version'], FLOOR) >= 0, 'target_runtime_below_security_floor')
-            if plan['mode'] == 'migration':
-                need(files_snapshot(plan['files']) == plan['files'], 'source_configuration_changed')
-                target_dir = Path('/etc/php/8.5/fpm/pool.d')
-                need(sorted(p.name for p in target_dir.glob('*.conf')) == ['www.conf'], 'unexpected_target_pools')
-                atomic(job / 'target-default-www.conf', safe_file(target_dir / 'www.conf'))
-                # Archive rather than delete the distribution's unused default pool.
-                (target_dir / 'www.conf').rename(target_dir / ('www.conf.distribution-' + job.name))
-                for name, content in pool_outputs(plan['pools'], plan['parsed_pools'], plan['socket_map']).items():
-                    old_path = next(path for path in plan['pools'] if Path(path).name == name)
-                    record = plan['files'][old_path]
-                    atomic(target_dir / name, content.encode(), record['mode'])
-                    os.chown(target_dir / name, record['uid'], record['gid'])
-                global_path = Path('/etc/php/8.5/fpm/php-fpm.conf')
-                atomic(job / 'target-default-global.conf', safe_file(global_path))
-                record = plan['files']['/etc/php/' + plan['source_branch'] + '/fpm/php-fpm.conf']
-                atomic(global_path, plan['target_global_FPM'].encode(), record['mode'])
-                os.chown(global_path, record['uid'], record['gid'])
-                for sapi, old_registry, target_registry in (
-                    ('fpm', plan['source_registry'], target), ('cli', plan['source_CLI_registry'], target_cli)):
-                    settings = plan['INI_files'][sapi]
-                    mode, gid = merged_mode([plan['files'][path] for path in settings])
-                    path = Path('/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini')
-                    atomic(path, ini_output(old_registry, target_registry, settings).encode(), mode)
-                    os.chown(path, 0, gid)
-                for text in plan['pools'].values():
-                    for key in re.findall(r'(?m)^\s*php_(?:admin_)?(?:value|flag)\[([^\]]+)\]\s*=', text):
-                        need(key in target['ini'], 'unsupported_forwarded_pool_INI_setting')
-                for sapi, old_registry, target_registry in (
-                    ('fpm', plan['source_registry'], target), ('cli', plan['source_CLI_registry'], target_cli)):
-                    current = registry(TARGET, sapi == 'fpm')
-                    expected = forwarded_values(old_registry, target_registry, plan['INI_files'][sapi])
-                    need(all(current['ini'].get(key) == value for key, value in expected.items()), 'forwarded_INI_effective_value_mismatch')
-                    need({x.lower() for x in old_registry['modules']} <= {x.lower() for x in current['modules']}, 'forwarded_extension_parity_failed')
-            else:
-                for sapi, baseline, observed in (('fpm', plan['source_registry'], target),
-                                                  ('cli', plan['source_CLI_registry'], target_cli)):
-                    expected = forwarded_values(baseline, observed, plan['INI_files'][sapi])
-                    need(all(observed['ini'].get(key) == value for key, value in expected.items()), 'patched_INI_effective_value_drift')
-                    need({x.lower() for x in baseline['modules']} <= {x.lower() for x in observed['modules']}, 'patched_extension_parity_failed')
-            command(['/usr/sbin/php-fpm8.5', '-t'])
-            if plan['mode'] == 'migration':
-                command(['/bin/systemctl', 'enable' if plan['source_enabled'] else 'disable', 'php8.5-fpm.service'])
-            if plan['mode'] == 'migration' or plan['changes']:
-                command(['/bin/systemctl', 'restart', 'php8.5-fpm.service'], 90)
-            runtime_proof = fpm_ready(plan['socket_map'].values())
-            atomic(job / 'runtime-before-cutover.json', encoded(runtime_proof))
-            if plan['mode'] == 'migration':
-                # Recheck complete Nginx source graph before committing exact operand edits.
-                need(files_snapshot(plan['nginx']['files']) == {p: plan['files'][p] for p in plan['nginx']['files']}, 'Nginx_configuration_drift')
-                journal.phase('Nginx_cutover')
-                outputs = route_outputs(plan['nginx']['files'], plan['nginx']['routes'], plan['socket_map'])
-                atomic(job / 'owned-Nginx-edits.json', encoded({path: digest(text.encode()) for path, text in outputs.items()}))
-                for path, text in outputs.items():
-                    p = Path(path).resolve()
-                    record = plan['files'][path]
-                    atomic(p, text.encode(), record['mode'])
-                    os.chown(p, record['uid'], record['gid'])
-                command(['/usr/sbin/nginx', '-t'])
-                command(['/bin/systemctl', 'reload', 'nginx.service'])
-            journal.phase('web_verification')
-            for attempt in range(3):
-                time.sleep(2)
-                try:
-                    health(plan['nginx']['health'])
-                    break
-                except Hold:
-                    if attempt == 2:
-                        raise
-            atomic(job / 'runtime-after-cutover.json', encoded(fpm_ready(plan['socket_map'].values())))
-            final_nginx = nginx_inventory()
-            expected_routes = {plan['socket_map'][row['socket']] for row in plan['nginx']['routes']}
-            need({r['socket'] for r in final_nginx['routes']} == expected_routes, 'final_Nginx_socket_mismatch')
-            if plan['mode'] == 'migration':
-                for name in alternatives:
-                    target_path = '/usr/bin/' + name + TARGET
-                    if Path(target_path).is_file():
-                        command(['/usr/bin/update-alternatives', '--set', name, target_path])
-            elif plan['changes']:
-                for name, mode in alternative_modes.items():
-                    if mode == 'auto':
-                        command(['/usr/bin/update-alternatives', '--auto', name])
-                        selected = command(['/usr/bin/update-alternatives', '--query', name])
-                        need(re.search(r'^Value: (.+)$', selected, re.M)[1] == alternatives[name], 'automatic_selector_drift')
-            need(command(['/usr/bin/php', '-n', '-r', 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;']).strip() == TARGET, 'default_CLI_not_8_5')
-            atomic(job / 'verification.json', encoded(dict(PHP_version=target['version'],
-                   target_packages={name: after[name] for name in plan['target_records']},
-                   Nginx_sockets=sorted(plan['socket_map'].values()), web_smoke_checks=True,
-                   application_compatibility_claim=False, legacy_packages_preserved=True,
-                   scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False)))
-            journal.phase('complete', PHP_version=target['version'], legacy_retirement_required=plan['mode'] == 'migration',
-                          scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False)
+            finish_configuration(plan, job, journal, alternatives, alternative_modes, after)
         except BaseException as error:
             journal.phase('failed_needs_review', reason=str(error) if isinstance(error, Hold) else type(error).__name__,
                           recovery=str(job / 'recovery.json') if (job / 'recovery.json').exists() else None,
