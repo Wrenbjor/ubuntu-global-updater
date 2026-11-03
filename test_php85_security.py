@@ -40,6 +40,171 @@ class Files(unittest.TestCase):
   with patch.object(M.os,'open',side_effect=raced):
    with self.assertRaisesRegex(M.Hold,'changed_during_read'):M.safe_file(self.file)
 
+class MergedUsrParents(unittest.TestCase):
+ """Real private filesystem fixtures; no host /lib or native tools are touched."""
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory(prefix='php85-usrmerge-')
+  self.root=Path(self.tmp.name);self.root.chmod(0o700)
+  self.addCleanup(self.tmp.cleanup)
+  self.addCleanup(patch.stopall)
+  patch.object(M,'_SECURITY_ROOT',self.root).start()
+  patch.object(M,'_SECURITY_UID',os.geteuid()).start()
+  patch.object(M,'command',side_effect=AssertionError('native commands forbidden in filesystem fixtures')).start()
+  patch.object(M.subprocess,'run',side_effect=AssertionError('native subprocess forbidden')).start()
+  self.payload=b'[Service]\nExecStart=/fixture/never-executed\n'
+
+ def merged(self,name='lib',absolute=False):
+  target=self.root/'usr'/name
+  target.mkdir(mode=0o755,parents=True,exist_ok=True)
+  leaf=target/'systemd'/'system'/'php-fpm.service'
+  leaf.parent.mkdir(mode=0o755,parents=True,exist_ok=True)
+  leaf.write_bytes(self.payload);leaf.chmod(0o600)
+  alias=self.root/name
+  if alias.is_symlink():alias.unlink()
+  alias.symlink_to(str(target) if absolute else 'usr/'+name,target_is_directory=True)
+  return alias/'systemd'/'system'/'php-fpm.service',leaf,alias,target
+
+ def snapshot(self,path):return M.files_snapshot([path])[str(path)]
+
+ def test_all_four_fixed_merged_prefixes_accept_exact_relative_and_absolute_targets(self):
+  for name in ('bin','sbin','lib','lib64'):
+   for absolute in (False,True):
+    with self.subTest(name=name,absolute=absolute):
+     logical,canonical,alias,target=self.merged(name,absolute)
+     leaf,records=M._safe_parents(logical)
+     self.assertEqual(leaf,canonical)
+     self.assertEqual(records,[(alias,M._file_identity(alias.lstat()),os.readlink(alias))])
+     self.assertEqual(M.safe_file(logical,True),self.payload)
+     metadata=self.snapshot(logical)
+     self.assertEqual(metadata['resolved'],str(canonical))
+     self.assertIsNone(metadata['link'])
+     self.assertEqual(metadata['parent_aliases'],[dict(path=str(alias),
+      identity=list(M._file_identity(alias.lstat())),target=os.readlink(alias))])
+
+ def test_unmerged_root_level_real_directories_remain_valid(self):
+  for name in ('bin','sbin','lib','lib64'):
+   with self.subTest(name=name):
+    parent=self.root/name;parent.mkdir(mode=0o755)
+    leaf=parent/'fixture';leaf.write_bytes(self.payload);leaf.chmod(0o600)
+    canonical,aliases=M._safe_parents(leaf)
+    self.assertEqual(canonical,leaf);self.assertEqual(aliases,[])
+    self.assertEqual(M.safe_file(leaf,True),self.payload)
+    self.assertEqual(self.snapshot(leaf)['parent_aliases'],[])
+
+ def test_leaf_alias_chain_may_cross_a_fixed_merged_parent_without_losing_logical_link(self):
+  logical,canonical,parent_alias,target=self.merged()
+  directory=self.root/'etc'/'php';directory.mkdir(mode=0o755,parents=True)
+  intermediate=directory/'native.ini';intermediate.symlink_to(str(logical))
+  leaf=directory/'active.ini';leaf.symlink_to('native.ini')
+  self.assertEqual(M.safe_file(leaf),self.payload)
+  metadata=self.snapshot(leaf)
+  self.assertEqual(metadata['link'],'native.ini')
+  self.assertEqual(metadata['resolved'],str(canonical))
+  self.assertEqual(metadata['parent_aliases'][0]['path'],str(parent_alias))
+  with self.assertRaisesRegex(M.Hold,'private_file_symlink'):M.safe_file(leaf,True)
+
+ def test_only_exact_fixed_parent_alias_targets_are_accepted(self):
+  logical,canonical,alias,target=self.merged()
+  invalid=('usr/lib64','usr/share','./usr/lib','usr/../usr/lib','../usr/lib',
+           str(self.root/'usr'/'lib'/'..'/'lib'),'/usr/lib')
+  for value in invalid:
+   with self.subTest(value=value):
+    alias.unlink();alias.symlink_to(value,target_is_directory=True)
+    with self.assertRaises(M.Hold):M.safe_file(logical)
+
+ def test_arbitrary_root_and_nested_parent_aliases_are_not_admitted(self):
+  logical,canonical,alias,target=self.merged()
+  arbitrary=self.root/'other-lib';arbitrary.symlink_to(target,target_is_directory=True)
+  with self.assertRaisesRegex(M.Hold,'unsafe_file_parent'):
+   M.safe_file(arbitrary/'systemd'/'system'/'php-fpm.service')
+  directory=self.root/'conf';directory.mkdir(mode=0o755)
+  nested=directory/'lib';nested.symlink_to(target,target_is_directory=True)
+  with self.assertRaisesRegex(M.Hold,'unsafe_file_parent'):
+   M.safe_file(nested/'systemd'/'system'/'php-fpm.service')
+
+ def test_symlinked_canonical_usr_or_target_parent_is_held(self):
+  for component in ('usr','lib'):
+   with self.subTest(component=component),tempfile.TemporaryDirectory(dir=self.root) as local:
+    root=Path(local);root.chmod(0o700)
+    real=root/'real';(real/'lib'/'systemd').mkdir(mode=0o755,parents=True)
+    leaf=real/'lib'/'systemd'/'unit';leaf.write_bytes(self.payload);leaf.chmod(0o600)
+    if component=='usr':
+     (root/'usr').symlink_to(real,target_is_directory=True)
+    else:
+     (root/'usr').mkdir(mode=0o755)
+     (root/'usr'/'lib').symlink_to(real/'lib',target_is_directory=True)
+    (root/'lib').symlink_to('usr/lib',target_is_directory=True)
+    with patch.object(M,'_SECURITY_ROOT',root),self.assertRaisesRegex(M.Hold,'unsafe_file_parent'):
+     M.safe_file(root/'lib'/'systemd'/'unit')
+
+ def test_writable_canonical_ancestor_reports_original_request_and_specific_parent(self):
+  logical,canonical,alias,target=self.merged()
+  parent=self.root/'usr';parent.chmod(0o777)
+  with self.assertRaisesRegex(M.Hold,'unsafe_file_parent') as caught:M.safe_file(logical)
+  observed=parent.lstat()
+  self.assertEqual(caught.exception.details,dict(requested_path=str(logical),parent_path=str(parent),
+   uid=observed.st_uid,gid=observed.st_gid,mode=oct(stat.S_IMODE(observed.st_mode)),type='directory'))
+
+ def test_foreign_uid_on_alias_or_canonical_ancestor_is_rejected(self):
+  logical,canonical,alias,target=self.merged()
+  real=Path.lstat
+  for unsafe in (alias,self.root/'usr',target):
+   def foreign(path):
+    observed=real(path)
+    if path!=unsafe:return observed
+    values={name:getattr(observed,name) for name in dir(observed) if name.startswith('st_')}
+    values['st_uid']=os.geteuid()+1000
+    return types.SimpleNamespace(**values)
+   with self.subTest(parent=str(unsafe)),patch.object(Path,'lstat',foreign):
+    with self.assertRaisesRegex(M.Hold,'unsafe_file_parent') as caught:M.safe_file(logical)
+    self.assertEqual(caught.exception.details['parent_path'],str(unsafe))
+    self.assertEqual(caught.exception.details['requested_path'],str(logical))
+
+ def test_replacing_parent_alias_with_same_target_during_open_is_detected(self):
+  logical,canonical,alias,target=self.merged()
+  real=M.os.open;opened=[]
+  def raced(path,flags,*args,**kwargs):
+   opened.append(str(path))
+   alias.rename(self.root/'old-lib-alias');alias.symlink_to('usr/lib',target_is_directory=True)
+   return real(path,flags,*args,**kwargs)
+  with patch.object(M.os,'open',side_effect=raced),self.assertRaisesRegex(M.Hold,'alias_changed_during_read'):
+   M.safe_file(logical)
+  self.assertEqual(opened,[str(canonical)],'read only canonical leaf spelling after validating its parent alias')
+
+ def test_retargeting_parent_alias_to_equivalent_absolute_spelling_during_open_is_detected(self):
+  logical,canonical,alias,target=self.merged()
+  real=M.os.open
+  def raced(path,flags,*args,**kwargs):
+   alias.rename(self.root/'old-lib-alias');alias.symlink_to(target,target_is_directory=True)
+   return real(path,flags,*args,**kwargs)
+  with patch.object(M.os,'open',side_effect=raced),self.assertRaisesRegex(M.Hold,'alias_changed_during_read'):
+   M.safe_file(logical)
+
+ def test_same_content_parent_replacement_and_retarget_change_snapshot_metadata(self):
+  logical,canonical,alias,target=self.merged()
+  first=self.snapshot(logical)
+  alias.rename(self.root/'old-lib-alias');alias.symlink_to('usr/lib',target_is_directory=True)
+  second=self.snapshot(logical)
+  alias.rename(self.root/'second-old-lib-alias');alias.symlink_to(target,target_is_directory=True)
+  third=self.snapshot(logical)
+  for metadata in (second,third):
+   self.assertEqual(first['sha256'],metadata['sha256'])
+   self.assertEqual(first['resolved'],metadata['resolved'])
+   self.assertEqual(first['link'],metadata['link'])
+   self.assertNotEqual(first['parent_aliases'],metadata['parent_aliases'])
+   self.assertNotEqual(first,metadata)
+
+ def test_parent_alias_swap_reached_through_leaf_alias_is_detected(self):
+  logical,canonical,alias,target=self.merged()
+  leaf=self.root/'leaf.ini';leaf.symlink_to(logical)
+  real=M.os.open
+  def raced(path,flags,*args,**kwargs):
+   alias.rename(self.root/'old-lib-alias');alias.symlink_to('usr/lib',target_is_directory=True)
+   return real(path,flags,*args,**kwargs)
+  with patch.object(M.os,'open',side_effect=raced),self.assertRaisesRegex(M.Hold,'alias_changed_during_read'):
+   M.safe_file(leaf)
+
+
 class Sources(unittest.TestCase):
  def test_all_unsafe_list_boolean_forms_hold(self):
   for key in ('trusted','allow-insecure','allow-weak','allow-downgrade-to-insecure','allow-weak-downgrade-to-insecure'):

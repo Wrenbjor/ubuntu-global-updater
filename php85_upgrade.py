@@ -20,10 +20,11 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
+PREFLIGHT_V103_SHA256 = 'd6e87c645b9360886d865ba20dda61128e42f96b2b6cd94597e6c257c54af24f'
 BASE = Path('/var/lib/ubuntu-php85-upgrade')
 TARGET = '8.5'
 FLOOR = '8.5.12'
@@ -237,27 +238,45 @@ def _file_identity(info):
             info.st_gid, info.st_nlink, info.st_size, info.st_mtime_ns)
 
 
-def _safe_parents(path):
+def _safe_parents(path, requested=None):
+    """Validate real parents and only the fixed root-level merged-/usr aliases."""
     root = _SECURITY_ROOT
+    requested = path if requested is None else requested
     need(path.is_absolute() and '..' not in path.parts and (path == root or root in path.parents), 'unsafe_absolute_file_path')
     for parent in reversed(path.parents):
         if parent != root and root not in parent.parents:
             continue
         info = parent.lstat()
-        need(stat.S_ISDIR(info.st_mode) and info.st_uid == _SECURITY_UID
-             and not info.st_mode & 0o022, 'unsafe_file_parent')
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == _SECURITY_UID and not info.st_mode & 0o022:
+            continue
+        if (stat.S_ISLNK(info.st_mode) and parent.parent == root
+            and parent.name in ('bin', 'sbin', 'lib', 'lib64')
+            and info.st_uid == _SECURITY_UID and info.st_nlink == 1):
+            target = os.readlink(parent)
+            expected = root / 'usr' / parent.name
+            if target in ('usr/' + parent.name, str(expected)):
+                canonical, aliases = _safe_parents(expected / path.relative_to(parent), requested)
+                return canonical, [(parent, _file_identity(info), target)] + aliases
+        error = Hold('unsafe_file_parent')
+        error.details = dict(requested_path=str(requested), parent_path=str(parent),
+            uid=info.st_uid, gid=info.st_gid, mode=oct(stat.S_IMODE(info.st_mode)),
+            type='symlink' if stat.S_ISLNK(info.st_mode) else 'directory' if stat.S_ISDIR(info.st_mode) else 'other')
+        raise error
+    return path, []
 
 
 def _file_record(path, private=False):
     p = Path(path)
-    _safe_parents(p)
+    cursor, parent_aliases = _safe_parents(p)
     logical = p.lstat()
     need(logical.st_uid == _SECURITY_UID, 'unsafe_file_alias_owner')
     link = os.readlink(p) if stat.S_ISLNK(logical.st_mode) else None
     need(not private or link is None, 'private_file_symlink')
-    cursor, aliases = p, []
+    aliases = list(parent_aliases)
     for unused in range(16):
-        _safe_parents(cursor)
+        cursor, more_parents = _safe_parents(cursor, p)
+        parent_aliases.extend(more_parents)
+        aliases.extend(more_parents)
         alias = cursor.lstat()
         if not stat.S_ISLNK(alias.st_mode):
             break
@@ -268,7 +287,7 @@ def _file_record(path, private=False):
     else:
         raise Hold('file_alias_limit')
     resolved = cursor
-    _safe_parents(resolved)
+    _safe_parents(resolved, p)
     before = resolved.lstat()
     need(stat.S_ISREG(before.st_mode) and before.st_uid == _SECURITY_UID
          and not before.st_mode & 0o022 and before.st_nlink == 1, 'unsafe_file')
@@ -286,7 +305,9 @@ def _file_record(path, private=False):
              for alias, identity, target in aliases), 'file_alias_changed_during_read')
     return raw, dict(sha256=digest(raw), link=link, resolved=str(resolved),
         uid=opened.st_uid, gid=opened.st_gid, mode=stat.S_IMODE(opened.st_mode),
-        link_uid=logical.st_uid, link_inode=logical.st_ino if link is not None else None)
+        link_uid=logical.st_uid, link_inode=logical.st_ino if link is not None else None,
+        parent_aliases=[dict(path=str(alias), identity=list(identity), target=target)
+                        for alias, identity, target in parent_aliases])
 
 
 def safe_file(path, private=False):
@@ -1355,6 +1376,7 @@ def recover_v100_preflight(previous):
         '1.0.0': (PREFLIGHT_V100_SHA256, 'nginx_path_outside_config', False),
         '1.0.1': (PREFLIGHT_V101_SHA256, 'absolute_nginx_include_required', True),
         '1.0.2': (PREFLIGHT_V102_SHA256, 'Nginx_alias_requires_separate_health_profile', True),
+        '1.0.3': (PREFLIGHT_V103_SHA256, 'unsafe_file_parent', True),
     }
     need(previous.get('version') in cases, 'previous_job_preserved_use_status')
     code_sha, reason, has_details = cases[previous['version']]
@@ -1435,6 +1457,10 @@ def rollback():
         need(job.parent == BASE and not job.is_symlink(), 'invalid_recovery_job')
         plan = json.loads(safe_file(job / 'plan.json', True))
         need(digest(encoded(plan)) == safe_file(job / 'plan.sha256', True).decode().strip(), 'recovery_plan_changed')
+        # Older readers rejected every parent alias and omitted this field. Use
+        # an in-memory comparison view only; never rewrite the sealed old plan.
+        original_files = {path: dict(row, parent_aliases=row.get('parent_aliases', []))
+                          for path, row in plan['files'].items()}
         host = identity()
         need(all(host[key] == plan['host'][key] for key in ('machine_id', 'release', 'architecture')), 'recovery_host_mismatch')
         need(plan['mode'] == 'migration', 'same_branch_packages_require_external_recovery_no_downgrade')
@@ -1447,17 +1473,19 @@ def rollback():
             for name, record in plan['packages'].items():
                 if name == 'php' + plan['source_branch'] or name.startswith('php' + plan['source_branch'] + '-'):
                     need(installed.get(name) == record, 'original_PHP_packages_changed_cannot_restore')
-            old_configs = {path: row for path, row in plan['files'].items() if path.startswith('/etc/php/')}
+            old_configs = {path: row for path, row in original_files.items() if path.startswith('/etc/php/')}
             need(files_snapshot(old_configs) == old_configs, 'original_PHP_configuration_changed')
             source_unit = validate_native_unit(plan['source_branch'])
-            need(source_unit in plan['files'] and files_snapshot([source_unit])[source_unit] == plan['files'][source_unit],
+            need(source_unit in original_files and files_snapshot([source_unit])[source_unit] == original_files[source_unit],
                  'original_FPM_unit_changed')
             edits = json.loads(safe_file(job / 'owned-Nginx-edits.json', True)) if (job / 'owned-Nginx-edits.json').exists() else {}
             for path, new_sha in edits.items():
                 need(path in plan['files'], 'unowned_recovery_path')
-                before = plan['files'][path]
+                before = original_files[path]
                 observed = files_snapshot([path])[path]
-                need(all(observed[key] == before[key] for key in ('link', 'resolved', 'uid', 'gid', 'mode')), 'recovery_path_metadata_changed')
+                need(all(observed[key] == before[key] for key in ('link', 'resolved', 'uid', 'gid', 'mode'))
+                     and observed.get('parent_aliases', []) == before.get('parent_aliases', []),
+                     'recovery_path_metadata_changed')
                 need(observed['sha256'] in (new_sha, before['sha256']), 'configuration_changed_after_cutover')
             command(['/usr/sbin/php-fpm' + plan['source_branch'], '-t'])
             command(['/bin/systemctl', 'start', 'php' + plan['source_branch'] + '-fpm.service'])

@@ -35,6 +35,13 @@ canonical `.so` library must be root-safe and match installed package ownership
 and MD5 inventory; the admitted configuration contains only the module loader.
 This exception does not admit arbitrary external include or library paths.
 
+Standard merged-`/usr` layouts are supported only for the exact root-level
+`/bin`, `/sbin`, `/lib` and `/lib64` aliases to their matching `usr/<name>`
+directories. The real directories must be root-owned and safe. Alias identity
+and target changes are checked and recorded in configuration snapshots; this
+does not relax permissions or admit arbitrary parent symlinks. Unsafe-parent
+diagnostics identify the requested path, parent path, UID, GID, mode and type.
+
 The standard Forge ACME exception is also recognized: a static
 `location /.well-known/acme-challenge` prefix, optionally with a trailing slash
 or `^~`, may use a literal absolute alias such as `/home/forge/.letsencrypt`.
@@ -84,11 +91,12 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.3 has three narrowly defined automatic preflight recovery cases on the
+Version 1.0.4 has four narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
-1.0.2 `Nginx_alias_requires_separate_health_profile` failure. Each must match its original core,
+1.0.2 `Nginx_alias_requires_separate_health_profile` failure, plus the exact
+byte-pinned version 1.0.3 `unsafe_file_parent` failure. Each must match its original core,
 three-event preflight chain and timer evidence, with empty failure details and
 no recovery reference. Eligibility requires no sealed plan or package action
 and restored timer activity. Cached APT indexes may already have been refreshed;
@@ -96,6 +104,8 @@ this is not a claim that nothing changed. All original evidence and the old
 current-job pointer are archived durably before a new job. Partial archival and
 every other failed-job shape still hold for inspection. No additional recovery
 flag or host ID is needed; rerun the same apply command.
+The version 1.0.3 exception still requires empty details exactly. A new version
+1.0.4 failure carrying path diagnostics is not automatically reset.
 
 For a failure before the sealed plan, recovery metadata may not exist. Its status
 diagnostic reports `recovery: null` rather than treating that missing file as a
