@@ -1,17 +1,15 @@
 {
-  "deterministic_embedded_sources": true,
+  "embedded_Python": false,
   "errors": 0,
   "failures": 0,
-  "fixture_log_sha256": "19c2dba842e43e1c739436a00ab5c85b2e8145e1ce9ccc7fe3f7250b9f7e1712",
-  "limits": "Offline fixtures only; no live v2 installation or application migration claimed.",
+  "fixture_log_sha256": "f15c1b8f78a01f3d004da211eea60c01ca33d3f19435ccfd504b9329d7e8f65d",
+  "independent_Bash_source_review": "approved",
   "production_execution": false,
+  "reviewed_source_sha256": "4d6a2568a2c9635193a918a25a5391b317e4feb5de1e5af3296c7aaeb3161f1f",
   "shell_syntax": true,
   "skips": 0,
-  "source_review": {
-    "build_php85_release.py": "5f7db72909b729c5ff3e6e0bb3539fa4828113b2c94b944f8bcbdec3bf3ec0c5",
-    "php85_config.py": "39bbe801d18e682d3315234ff3686aca54f3a970694cac960ba3a6e7586eb6dc",
-    "php85_upgrade.py": "75fdcd27db3e9d912a495695831b8214c458ec1a156c2d43b1d449ef6911f82d"
-  },
-  "tests": 44,
-  "version": "2.0.0"
+  "test_scope": "Mocked package/repository/service commands and temporary filesystem fixtures; no live installation claimed.",
+  "tests": 13,
+  "version": "3.0.0",
+  "whole_download_guard": true
 }

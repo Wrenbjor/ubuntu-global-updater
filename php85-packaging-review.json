@@ -1,24 +1,18 @@
 {
-  "approved_sources": {
-    "build_php85_release.py": "5f7db72909b729c5ff3e6e0bb3539fa4828113b2c94b944f8bcbdec3bf3ec0c5",
-    "php85_config.py": "39bbe801d18e682d3315234ff3686aca54f3a970694cac960ba3a6e7586eb6dc",
-    "php85_upgrade.py": "75fdcd27db3e9d912a495695831b8214c458ec1a156c2d43b1d449ef6911f82d"
-  },
+  "active_runtime_files": [
+    "php85.sh"
+  ],
   "files": {
-    "README-php85.md": "85f0695bfd8c74d4f9b52d4cfd0c07611fca7a8495841165720d01ac13c36d60",
-    "build_php85_release.py": "5f7db72909b729c5ff3e6e0bb3539fa4828113b2c94b944f8bcbdec3bf3ec0c5",
-    "php85-validation.json": "106cd645d9d1b0d8e021723580d178c58b0ff1b2771989b2af53a86a0f50cb91",
-    "php85.sh": "908955fffd6d0aaa086a1cc5979b71710922d6100ab9c9660e6826cd03ea1954",
-    "php85_config.py": "39bbe801d18e682d3315234ff3686aca54f3a970694cac960ba3a6e7586eb6dc",
-    "php85_upgrade.py": "75fdcd27db3e9d912a495695831b8214c458ec1a156c2d43b1d449ef6911f82d",
-    "test_bootstrap.py": "015e842fff7c6d54319dd393d7dfb95faabe1ee7363fbb6f61ca2074d37ecf73",
-    "test_php85_config.py": "01595539715e80053232d5148c51c1a0045ccb00e7343051fc0ce5aaaf921618",
-    "test_php85_security.py": "75f291e33b747e66bd4bb46ed3a35e6e11821a079cd245394cca174281990bf7",
-    "test_php85_upgrade.py": "33c4053e9f035bf2351c6cf129f4b61c998ff1902c8af022682a36eeb80bb014"
+    "README-php85.md": "dce41e01ffbf455d507117f27600f111d479f3d0e66c778167858a823f265c74",
+    "build_php85_release.py": "8217a29000fb5f7ad3f3a61de19a63db39cdb8e1fa09dca9dc1addfe756a514b",
+    "php85-validation.json": "b9afa82d6b084ac6b8aa027aaa1416925a015c53f1c961bd2afbdf23397c2db2",
+    "php85.sh": "4d6a2568a2c9635193a918a25a5391b317e4feb5de1e5af3296c7aaeb3161f1f",
+    "test_php85_shell.py": "99f3df5240aeffbb019bc9d9aab8c0b98cfc6af21b0aded047c306a8990a1525"
   },
   "independent_source_review": "approved",
-  "old_updater_checkpoints": "preserved and not used as admission gates",
+  "previous_Python_modules": "Historical references; not downloaded or executed by php85.sh",
   "production_execution": false,
-  "profile": "Native Ubuntu 22.04; standard Nginx, one www FPM pool, local Unix socket; files sessions",
-  "version": "2.0.0"
+  "profile": "Ubuntu 22.04/24.04; standard Nginx/direct Unix route; one www FPM pool",
+  "reviewed_source_sha256": "4d6a2568a2c9635193a918a25a5391b317e4feb5de1e5af3296c7aaeb3161f1f",
+  "version": "3.0.0"
 }

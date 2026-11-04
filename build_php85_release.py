@@ -1,4 +1,4 @@
-"""Build a complete self-contained Bash entry point; no updater execution."""
+"""Legacy v2 render helpers retained for reference; main only checks the current standalone Bash."""
 import argparse
 import base64
 import gzip
@@ -62,17 +62,11 @@ php85_main "$@" '__SENTINEL__' '''
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='php85.sh is standalone Bash; no build is required.')
     parser.add_argument('--check', action='store_true')
-    args = parser.parse_args()
-    shell = render((ROOT / 'php85_upgrade.py').read_bytes(), (ROOT / 'php85_config.py').read_bytes())
-    if args.check:
-        assert (ROOT / 'php85.sh').read_bytes() == shell, 'Installer differs from readable sources'
-    else:
-        (ROOT / 'php85.sh').write_bytes(shell)
-    subprocess.run(['bash','-n',str(ROOT / 'php85.sh')],check=True)
-    assert render((ROOT / 'php85_upgrade.py').read_bytes(), (ROOT / 'php85_config.py').read_bytes()) == shell
-    print('Installer SHA256:', sha(shell))
+    parser.parse_args()
+    subprocess.run(['bash', '-n', str(ROOT / 'php85.sh')], check=True)
+    print('Standalone php85.sh: Bash syntax OK; no files were generated.')
 
 
 if __name__ == '__main__':

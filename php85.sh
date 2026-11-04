@@ -1,35 +1,217 @@
 #!/bin/bash
-# PHP 8.5 updater v2.0.0. No actions until the complete final function call.
+# PHP 8.5: repository -> apt update/install -> pool -> Nginx -> services -> checks.
+# The final completion argument prevents a truncated download from starting work.
 php85_main() (
-set -euo pipefail
-[[ "$#" -ge 1 && "${!#}" == 'PHP85-COMPLETE-5c8d0d7d50bfddc3e55b4b17f33944b020863c3d581cd36d9285740b534ca341' ]] || { echo 'Incomplete PHP85 bootstrap' >&2; exit 1; }
+set -Eeuo pipefail
+[[ $# -ge 1 && ${!#} == 'PHP85_SHELL_V3_COMPLETE' ]] || { echo 'Incomplete download' >&2; exit 1; }
 set -- "${@:1:$#-1}"
-for unsafe in LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV APT_CONFIG PYTHONPATH PYTHONHOME; do
-    [[ ! -v "$unsafe" ]] || { echo "Remove unsafe environment variable: $unsafe" >&2; exit 1; }
+if [[ $# == 2 && $2 == --adopt-vendor-socket ]]; then set -- "$1"; fi
+status=0
+case "${1:---plan-only}" in --apply) apply=1;; --plan-only) apply=0;; --status) status=1;apply=0;; *) echo 'Use --plan-only, --apply or --status' >&2; exit 1;; esac
+[[ $# -le 1 ]] || { echo 'Use one mode argument' >&2; exit 1; }
+for name in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH APT_CONFIG; do
+    [[ ! -v $name ]] || { echo "Remove unsafe environment variable: $name" >&2; exit 1; }
 done
-/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C LC_ALL=C /usr/bin/python3 -I -B - "$@" <<'PHP85_PAYLOAD'
-import base64,gzip,hashlib,io,os,re,subprocess,sys,tempfile
-blob='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'
-expected='5c8d0d7d50bfddc3e55b4b17f33944b020863c3d581cd36d9285740b534ca341'
-size=56448
-args=sys.argv[1:]
-allowed=([],['--plan-only'],['--apply'],['--status'],['--rollback'],['--apply','--adopt-vendor-socket'],['--plan-only','--adopt-vendor-socket'])
-explicit_rollback=(len(args)==3 and args[:2]==['--rollback','--run'] and re.fullmatch(r'(?:/var/lib/php85-updater/)?run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}',args[2]))
-if args not in allowed and not explicit_rollback: raise SystemExit('Unsupported PHP updater options')
-if os.geteuid()!=0: raise SystemExit('Run as root (or pipe to sudo bash)')
-if sys.version_info<(3,10): raise SystemExit('Ubuntu 22.04 Python 3.10 or newer required')
-with gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(blob,validate=True))) as packed:
-    code=packed.read(size+1)
-if len(code)!=size or hashlib.sha256(code).hexdigest()!=expected: raise SystemExit('Incomplete or modified installer payload')
-compile(code,'php85_upgrade.py','exec')
-with tempfile.TemporaryDirectory(prefix='php85-bootstrap-',dir='/run') as folder:
-    os.chmod(folder,0o700)
-    path=os.path.join(folder,'php85_upgrade.py')
-    with open(path,'wb') as out:
-        os.fchmod(out.fileno(),0o600);out.write(code)
-    env=dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C')
-    result=subprocess.run(['/usr/bin/python3','-I','-B',path]+args,stdin=subprocess.DEVNULL,env=env)
-    raise SystemExit(result.returncode)
-PHP85_PAYLOAD
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
+config_root=/etc
+run_root=/run
+proc_root=/proc
+home_root=/root
+target=8.5
+die() { echo "STOP: $*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || die 'Run as root'
+. "$config_root/os-release"
+[[ $ID == ubuntu && ( $VERSION_ID == 22.04 || $VERSION_ID == 24.04 ) ]] || die 'Ubuntu 22.04 or 24.04 required; no OS upgrades are performed'
+if [[ $status == 1 ]]; then
+    php -n -v || true; php-fpm8.5 -v || true; nginx -v || true
+    systemctl --no-pager list-units --all 'php*-fpm.service' nginx.service || true
+    nginx -t || true
+    nginx -T 2>/dev/null | awk '/^[[:space:]]*fastcgi_pass[[:space:]]/{print}' || true
+    exit 0
+fi
+[[ -z $(dpkg --audit) ]] || die 'Unfinished package operation; inspect dpkg --audit'
+nginx -t
+dump=$(nginx -T 2>/dev/null)
+route_count=$(grep -cE '^[[:space:]]*fastcgi_pass[[:space:]]' <<<"$dump" || true)
+routes=$(sed -nE 's@^[[:space:]]*fastcgi_pass[[:space:]]+unix:/(var/)?run/php/php(7\.[234]|8\.[0-5])-fpm\.sock[[:space:]]*;[[:space:]]*(#.*)?$@\2@p' <<<"$dump")
+[[ $(wc -l <<<"$routes") -eq $route_count ]] || die 'Use direct, unquoted Unix PHP-FPM routes for this script'
+mapfile -t branches < <(sort -u <<<"$routes")
+[[ ${#branches[@]} -eq 1 && -n ${branches[0]} ]] || die 'One active web PHP branch is required'
+source=${branches[0]}
+mapfile -t files < <(awk '/^# configuration file / {f=$0;sub(/^# configuration file /,"",f);sub(/:$/,"",f)} /^[[:space:]]*fastcgi_pass[[:space:]]/ {print f}' <<<"$dump" | sort -u)
+for i in "${!files[@]}"; do
+    files[$i]=$(readlink -f -- "${files[$i]}")
+    [[ ${files[$i]} == "$config_root/nginx/"* && -f ${files[$i]} && -O ${files[$i]} ]] || die 'Nginx route file must be root-owned inside /etc/nginx'
+done
+hosts=()
+for file in "${files[@]}"; do
+    host=$(awk '/^[[:space:]]*server_name[[:space:]]/{for(i=2;i<=NF;i++){gsub(/;/,"",$i);if($i~/^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]+$/){print $i;exit}}}' "$file")
+    [[ -n $host ]] || die "No primary hostname in $file; this script expects a complete site file"
+    hosts+=("$host")
+done
+old_pool="$config_root/php/$source/fpm/pool.d/www.conf"
+new_pool="$config_root/php/8.5/fpm/pool.d/www.conf"
+[[ -f $old_pool && $(find "$config_root/php/$source/fpm/pool.d" -maxdepth 1 -name '*.conf' | wc -l) -eq 1 ]] || die 'This script supports one standard www pool'
+listen=$(awk -F= '/^[[:space:]]*listen[[:space:]]*=/{sub(/[;#].*/,"",$2);gsub(/[[:space:]]/,"",$2);v=$2}END{print v}' "$old_pool")
+[[ $listen == "/run/php/php$source-fpm.sock" || $listen == "/var/run/php/php$source-fpm.sock" ]] || die 'Source www pool does not match the web socket'
+for pool in "$config_root/php/8.5/fpm/pool.d/"*.conf; do
+    [[ ! -f $pool || $pool == "$new_pool" ]] || die 'Additional PHP 8.5 pools require their own service plan'
+done
+table=$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n')
+mapfile -t packages < <({
+    printf 'php8.5-cli\nphp8.5-fpm\nphp8.5-common\n'
+    awk -v old="php$source-" '$1=="ii" || $1=="rc" {n=$2;sub(/:.*/,"",n);if(index(n,old)==1){s=substr(n,length(old)+1);if(s!~/^(json|opcache|dev)$/)print "php8.5-"s} if($1=="ii" && n~/^php8[.]5-/ && n!~/-(json|opcache)$/)print n}' <<<"$table"
+} | sort -u)
+# Pin existing database/web/OS/legacy packages so APT cannot upgrade them as side effects.
+mapfile -t protected < <(awk '$1=="ii" && $2~/^(mysql|mariadb|percona|postgresql|nginx|libnginx|apache|libapache|redis-server|nodejs|libnode|openssh|systemd|linux-|ubuntu-|grub|initramfs|php7[.][234]-|php8[.][0-4]-)/ {print $2"="$3}' <<<"$table")
+echo "Host: $(hostname); Ubuntu $VERSION_ID; web PHP $source -> $target"
+printf 'PHP packages: '; printf '%s ' "${packages[@]}"; echo
+if [[ $apply == 0 ]]; then
+    echo 'PLAN: ensure ppa:ondrej/php for this Ubuntu release; apt-get update; apt-get install --no-remove the listed PHP packages.'
+    echo 'PLAN: back up configs; reuse a configured 8.5 pool or copy the source www pool/settings; change Nginx socket routes.'
+    echo 'PLAN: test/restart PHP 8.5 FPM; test/reload Nginx; check CLI/FPM versions and primary homepage/login responses.'
+    exit 0
+fi
+umask 077
+mkdir -p "$run_root/ubuntu-php-updater"
+[[ -d $run_root/ubuntu-php-updater && ! -L $run_root/ubuntu-php-updater && -O $run_root/ubuntu-php-updater ]] || die 'Unsafe maintenance lock directory'
+chmod 700 "$run_root/ubuntu-php-updater"
+exec 9>"$run_root/ubuntu-php-updater/worker.lock"
+flock -n 9 || die 'Another PHP/Ubuntu updater is running'
+backup=$(mktemp -d "$home_root/php85-backup.XXXXXX")
+echo "Backups and private logs: $backup"
+timers=()
+success=0
+cli_before=$(update-alternatives --query php 2>/dev/null | awk '/^Value: /{print $2}' || true)
+update-alternatives --query php >"$backup/cli-before.txt" 2>&1 || true
+restore_timers() {
+    if ((${#timers[@]})); then
+        local pending=("${timers[@]}"); timers=()
+        systemctl start "${pending[@]}"
+        for timer in "${pending[@]}"; do systemctl is-active --quiet "$timer"; done
+    fi
+}
+cleanup() {
+    local rc=$?
+    if [[ $success == 0 && -n $cli_before && -x $cli_before && $rc != 130 && $rc != 143 ]]; then
+        update-alternatives --set php "$cli_before" >>"$backup/services.log" 2>&1 || rc=1
+    fi
+    restore_timers || rc=1
+    [[ $rc == 0 ]] || echo "FAILED: inspect $backup; no automatic rollback was performed" >&2
+    exit "$rc"
+}
+trap cleanup EXIT
+for timer in apt-daily.timer apt-daily-upgrade.timer; do
+    if systemctl is-active --quiet "$timer"; then timers+=("$timer"); fi
+done
+((${#timers[@]}==0)) || systemctl stop "${timers[@]}"
+for file in "${files[@]}"; do cp -a --parents -- "$file" "$backup/"; done
+for branch in "$source" "$target"; do
+    [[ ! -d $config_root/php/$branch ]] || cp -a --parents -- "$config_root/php/$branch" "$backup/"
+done
+# Record existing site responses; an already-down old PHP service can be repaired.
+for host in "${hosts[@]}"; do
+    for path in / /wp-login.php; do
+        code=$(curl --noproxy '*' --resolve "$host:443:127.0.0.1" --connect-timeout 3 --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://$host$path" 2>>"$backup/health.log") || true
+        echo "BEFORE $host$path HTTP $code" >>"$backup/health.log"
+    done
+done
+# Use Ubuntu's repository command instead of a custom signing/key framework.
+php_suites() { apt-cache policy | awk '$2~/^https?:\/\/(ppa.launchpad.net|ppa.launchpadcontent.net|ppa.setup-php.com)\/ondrej\/php\/ubuntu\/?$/ {print $3}'; }
+check_suites() {
+    while IFS= read -r suite; do
+        [[ -z $suite || $suite == "$VERSION_CODENAME/main" ]] || die 'An Ondrej PHP source targets another Ubuntu release; correct it first'
+    done <<<"$1"
+}
+suites=$(php_suites); check_suites "$suites"
+if [[ -z $suites ]]; then
+    if ! command -v add-apt-repository >/dev/null; then
+        timeout 180 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any update >>"$backup/apt.log" 2>&1
+        apt-get -y --no-remove -o DPkg::Lock::Timeout=60 install software-properties-common "${protected[@]}" >>"$backup/apt.log" 2>&1
+    fi
+    timeout 180 add-apt-repository -n -y ppa:ondrej/php >>"$backup/repository.log" 2>&1
+fi
+echo 'Refreshing APT indexes...'
+timeout 180 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any update >>"$backup/apt.log" 2>&1
+suites=$(php_suites); check_suites "$suites"
+[[ -n $suites ]] || die 'PHP repository indexes are unavailable; enable ppa:ondrej/php for this release'
+pins=()
+for package in "${packages[@]}"; do
+    candidate=$(apt-cache policy "$package" | awk '/Candidate:/{print $2}')
+    [[ $candidate == *"+ubuntu$VERSION_ID."* ]] || die "No matching-release candidate for $package"
+    if [[ $package == php8.5-cli || $package == php8.5-fpm || $package == php8.5-common ]]; then
+        upstream=${candidate#*:}
+        [[ $upstream =~ ^8\.5\.([0-9]+)[-+] && ${BASH_REMATCH[1]} -ge 12 ]] || die "Candidate below the reviewed PHP 8.5.12 security floor: $package"
+    fi
+    pins+=("$package=$candidate")
+done
+apt-get -s --no-remove install "${pins[@]}" "${protected[@]}" >"$backup/apt-plan.txt" 2>&1
+! grep -q '^Remv ' "$backup/apt-plan.txt" || die 'APT proposed package removals'
+! grep -qE '^Inst (mysql|mariadb|percona|postgresql|nginx|libnginx|apache|libapache|redis-server|nodejs|libnode|openssh|systemd|linux-|ubuntu-|grub|initramfs|php7\.[234]-|php8\.[0-4]-)' "$backup/apt-plan.txt" || die 'APT proposed changing a protected package'
+echo 'Installing/updating PHP 8.5 and matching extensions...'
+# No wall-clock timeout around a running native package transaction.
+apt-get -y --no-remove -o DPkg::Lock::Timeout=60 -o APT::Get::AllowUnauthenticated=false -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${pins[@]}" "${protected[@]}" >>"$backup/apt.log" 2>&1
+[[ -z $cli_before || ! -x $cli_before ]] || update-alternatives --set php "$cli_before" >>"$backup/services.log" 2>&1
+if [[ $source != 8.5 ]]; then
+    old_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$old_pool")
+    new_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$new_pool")
+    template=$(dpkg-query -L php8.5-fpm | awk '/^\/usr\/share\/.*\/www.conf$/{print}')
+    stock=0
+    if [[ -n $template && -f $template ]] && cmp -s "$new_pool" "$template"; then stock=1; fi
+    if [[ $stock == 0 ]]; then
+        checksum=$(dpkg-query -W -f='${Conffiles}' php8.5-fpm | awk -v p="$new_pool" '$1==p && NF==2{print $2}')
+        if [[ -n $checksum && $(md5sum "$new_pool" | awk '{print $1}') == "$checksum" ]]; then stock=1; fi
+    fi
+    if [[ $stock == 1 ]]; then
+        cp -a -- "$old_pool" "$new_pool"
+        sed -i -E '/^[[:space:]]*listen[[:space:]]*=/s@php7\.[234]-fpm\.sock|php8\.[0-4]-fpm\.sock@php8.5-fpm.sock@' "$new_pool"
+        # Copy only application/settings directives, not old extension loaders or deprecated SID knobs.
+        for sapi in fpm cli; do
+            n=0
+            for file in "$config_root/php/$source/$sapi/php.ini" "$config_root/php/$source/$sapi/conf.d/"*.ini; do
+                [[ -f $file ]] || continue
+                out="$config_root/php/8.5/$sapi/conf.d/99-legacy-$source-$(printf '%04d' "$n").ini"; n=$((n+1))
+                [[ ! -e $out && ! -L $out ]] || die "Preserved settings already exist: $out"
+                awk -F= '/^[[:space:]]*\[(PATH|HOST)[[:space:]]*=/{exit 42} {k=$1;gsub(/^[[:space:]]+|[[:space:]]+$/,"",k);if(k~/^(memory_limit|max_execution_time|max_input_time|max_input_vars|post_max_size|upload_max_filesize|date\.timezone|disable_functions|expose_php|display_errors|display_startup_errors|log_errors|error_reporting|error_log|allow_url_fopen|allow_url_include|open_basedir|auto_prepend_file|auto_append_file|default_socket_timeout|session\.(save_handler|save_path|serialize_handler|gc_.*|cookie_.*|use_.*)|mysqli\.default_socket|pdo_mysql\.default_socket|opcache\.(enable|memory_consumption|max_accelerated_files|validate_timestamps|revalidate_freq))$/)print}' "$file" >"$out"
+                chmod --reference="$file" "$out"; chown --reference="$file" "$out"
+            done
+        done
+    else
+        [[ $new_identity == "$old_identity" ]] && grep -qE '^[[:space:]]*listen[[:space:]]*=[[:space:]]*/(var/)?run/php/php8\.5-fpm\.sock[[:space:]]*$' "$new_pool" || die 'Existing PHP 8.5 pool differs; inspect its user/group/socket before overwriting it'
+    fi
+fi
+php-fpm8.5 -t >>"$backup/services.log" 2>&1
+systemctl enable php8.5-fpm >>"$backup/services.log" 2>&1
+systemctl restart php8.5-fpm >>"$backup/services.log" 2>&1
+systemctl is-active --quiet php8.5-fpm
+[[ -S $run_root/php/php8.5-fpm.sock ]] || die 'PHP 8.5 socket is missing'
+pid=$(systemctl show php8.5-fpm -p MainPID --value)
+[[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] && [[ $(stat -Lc '%d:%i' "$proc_root/$pid/exe") == "$(stat -Lc '%d:%i' "$(command -v php-fpm8.5)")" ]] || die 'FPM is not running the installed PHP 8.5 binary'
+fpm_version=$(php-fpm8.5 -v 2>>"$backup/services.log")
+[[ $fpm_version =~ PHP[[:space:]]8\.5\.([0-9]+) && ${BASH_REMATCH[1]} -ge 12 ]] || die 'FPM is not PHP 8.5.12 or newer'
+[[ $(. "$config_root/os-release"; echo "$VERSION_ID") == "$VERSION_ID" ]] || die 'Ubuntu release changed during this run'
+for file in "${files[@]}"; do
+    cmp -s "$file" "$backup/$file" || die 'Nginx configuration changed during package installation'
+    sed -i -E '/^[[:space:]]*fastcgi_pass[[:space:]]/s@php7\.[234]-fpm\.sock|php8\.[0-4]-fpm\.sock@php8.5-fpm.sock@' "$file"
+done
+nginx -t >>"$backup/services.log" 2>&1
+systemctl reload-or-restart nginx >>"$backup/services.log" 2>&1
+systemctl is-active --quiet nginx
+update-alternatives --set php /usr/bin/php8.5 >>"$backup/services.log" 2>&1
+php -n -r 'if (PHP_MAJOR_VERSION!==8 || PHP_MINOR_VERSION!==5 || PHP_RELEASE_VERSION<12) exit(1); echo "CLI PHP ",PHP_VERSION,PHP_EOL;'
+printf '%s\n' "$fpm_version"
+nginx -v
+nginx -T 2>>"$backup/services.log" | awk '/^[[:space:]]*fastcgi_pass[[:space:]]/{print}'
+for host in "${hosts[@]}"; do
+    for path in / /wp-login.php; do
+        code=$(curl --noproxy '*' --resolve "$host:443:127.0.0.1" --connect-timeout 3 --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://$host$path")
+        echo "$host$path HTTP $code"
+        [[ $code =~ ^[23][0-9][0-9]$ ]] || die 'Website health check failed; configurations and logs are retained'
+    done
+done
+[[ -z $(dpkg --audit) ]] || die 'Final package audit failed'
+restore_timers
+success=1
+echo "COMPLETE $(hostname): PHP 8.5, FPM active, Nginx active; backup $backup"
 )
-php85_main "$@" 'PHP85-COMPLETE-5c8d0d7d50bfddc3e55b4b17f33944b020863c3d581cd36d9285740b534ca341'
+php85_main "$@" 'PHP85_SHELL_V3_COMPLETE'
