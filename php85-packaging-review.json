@@ -1,53 +1,24 @@
 {
-  "actual_APT_or_service_actions": 0,
-  "actual_PHP_or_FPM_executed": false,
-  "artifact_sha256": {
-    "README-php85.md": "cc60a1a97a00eca8609020a687277892d6e19e1fb9387037f1a4b0387bfe833e",
-    "php85.sh": "4464ee73c8ffb6c45945ea63ca543e188fef1d321f6fa5d006c474778a619fa6",
-    "php85_upgrade.py": "c60f09624a8f4a27aa33c45223a2c7cf49be7aa2a868bf740ce5f53b2664a8b2"
+  "approved_sources": {
+    "build_php85_release.py": "5f7db72909b729c5ff3e6e0bb3539fa4828113b2c94b944f8bcbdec3bf3ec0c5",
+    "php85_config.py": "39bbe801d18e682d3315234ff3686aca54f3a970694cac960ba3a6e7586eb6dc",
+    "php85_upgrade.py": "75fdcd27db3e9d912a495695831b8214c458ec1a156c2d43b1d449ef6911f82d"
   },
-  "bootstrap": {
-    "bytes": 65737,
-    "core_sha256": "c60f09624a8f4a27aa33c45223a2c7cf49be7aa2a868bf740ce5f53b2664a8b2",
-    "embedded_payload_verified": true,
-    "production_actions": 0,
-    "shell_sha256": "4464ee73c8ffb6c45945ea63ca543e188fef1d321f6fa5d006c474778a619fa6",
-    "status": "built-local-only",
-    "version": "1.0.12"
+  "files": {
+    "README-php85.md": "85f0695bfd8c74d4f9b52d4cfd0c07611fca7a8495841165720d01ac13c36d60",
+    "build_php85_release.py": "5f7db72909b729c5ff3e6e0bb3539fa4828113b2c94b944f8bcbdec3bf3ec0c5",
+    "php85-validation.json": "106cd645d9d1b0d8e021723580d178c58b0ff1b2771989b2af53a86a0f50cb91",
+    "php85.sh": "908955fffd6d0aaa086a1cc5979b71710922d6100ab9c9660e6826cd03ea1954",
+    "php85_config.py": "39bbe801d18e682d3315234ff3686aca54f3a970694cac960ba3a6e7586eb6dc",
+    "php85_upgrade.py": "75fdcd27db3e9d912a495695831b8214c458ec1a156c2d43b1d449ef6911f82d",
+    "test_bootstrap.py": "015e842fff7c6d54319dd393d7dfb95faabe1ee7363fbb6f61ca2074d37ecf73",
+    "test_php85_config.py": "01595539715e80053232d5148c51c1a0045ccb00e7343051fc0ce5aaaf921618",
+    "test_php85_security.py": "75f291e33b747e66bd4bb46ed3a35e6e11821a079cd245394cca174281990bf7",
+    "test_php85_upgrade.py": "33c4053e9f035bf2351c6cf129f4b61c998ff1902c8af022682a36eeb80bb014"
   },
-  "builder_sha256": "4965788c6cb5a65ad320e81c8df92ae8b2b285d14eaa393f04aa75fec2f70eee",
-  "checks": {
-    "bash_syntax": true,
-    "compressed_and_payload_SHA256": true,
-    "deterministic_rebuild": true,
-    "emitted_payload_byte_equality": true,
-    "final_completion_token": true,
-    "root_layout_rebuild": true
-  },
-  "core_policy_test_results": "recorded separately by core author and independent reviewer",
-  "fixtures": {
-    "corrupt_payload_rejected": true,
-    "invalid_option_rejected": true,
-    "minimal_core_environment": true,
-    "modes": 7,
-    "package_actions": 0,
-    "pipeline_modes": 4,
-    "real_core_executed": false,
-    "service_actions": 0,
-    "status": "bootstrap-fixtures-pass",
-    "truncation_prefixes": 106,
-    "unsafe_environment_rejected": true,
-    "vendor_socket_opt_in_forwarded_explicit_modes": true,
-    "version_metadata_from_core_literal": true
-  },
-  "limits": [
-    "packaging fixtures do not prove application compatibility",
-    "no live PHP migration or package transaction performed in this review"
-  ],
-  "production_connections": 0,
-  "published": false,
-  "review_scope": "local-bootstrap-packaging-only",
-  "schema": 1,
-  "status": "PASS",
-  "version": "1.0.12"
+  "independent_source_review": "approved",
+  "old_updater_checkpoints": "preserved and not used as admission gates",
+  "production_execution": false,
+  "profile": "Native Ubuntu 22.04; standard Nginx, one www FPM pool, local Unix socket; files sessions",
+  "version": "2.0.0"
 }

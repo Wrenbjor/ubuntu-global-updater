@@ -1,50 +1,17 @@
 {
-  "PHP85_updater_version": "1.0.12",
-  "Python_3_10_grammar": true,
-  "bash_syntax": true,
-  "bootstrap_self_tests": "{\"status\": \"bootstrap-fixtures-pass\", \"modes\": 7, \"pipeline_modes\": 4, \"truncation_prefixes\": 106, \"version_metadata_from_core_literal\": true, \"vendor_socket_opt_in_forwarded_explicit_modes\": true, \"unsafe_environment_rejected\": true, \"minimal_core_environment\": true, \"invalid_option_rejected\": true, \"corrupt_payload_rejected\": true, \"real_core_executed\": false, \"package_actions\": 0, \"service_actions\": 0}",
+  "deterministic_embedded_sources": true,
   "errors": 0,
   "failures": 0,
-  "files": {
-    "README-php85.md": "cc60a1a97a00eca8609020a687277892d6e19e1fb9387037f1a4b0387bfe833e",
-    "build_php85_release.py": "4965788c6cb5a65ad320e81c8df92ae8b2b285d14eaa393f04aa75fec2f70eee",
-    "php85-packaging-review.json": "9dd9edc21f4eb5ee0cf9591b6aa34bee610e244e6a4f9614c6228b1fc09ff965",
-    "php85.sh": "4464ee73c8ffb6c45945ea63ca543e188fef1d321f6fa5d006c474778a619fa6",
-    "php85_runtime.py": "29857391d1637630760351af38a8cffc2ebfd54174532dc5d0e31706fff8fd2c",
-    "php85_upgrade.py": "c60f09624a8f4a27aa33c45223a2c7cf49be7aa2a868bf740ce5f53b2664a8b2",
-    "test_php85_runtime.py": "264fa380490edbb8eb290287d6264d0ee971f9d937d02e7e34849dbd6a053201",
-    "test_php85_security.py": "fd628ee22feefa55d23564a0085375cb04c358f97642af7e98005796d1c728be",
-    "test_php85_upgrade.py": "e1d22424a0473009146d130d24dd34f9f8b3f9a4d12b799e888dde109a5978e2"
-  },
-  "live_migration_tested": false,
+  "fixture_log_sha256": "19c2dba842e43e1c739436a00ab5c85b2e8145e1ce9ccc7fe3f7250b9f7e1712",
+  "limits": "Offline fixtures only; no live v2 installation or application migration claimed.",
   "production_execution": false,
-  "review": {
-    "independent_flow_and_fixture_review": true,
-    "runtime_proof_separate_author_and_fixture_tests": true,
-    "security_helper_reviewer_also_authored_scoped_security_helpers": true
-  },
-  "schema": 1,
-  "scope": "native Ubuntu22.04 Nginx/Unix-FPM web runtime and default CLI",
+  "shell_syntax": true,
   "skips": 0,
-  "test_groups": {
-    "test_php85_runtime": {
-      "errors": 0,
-      "failures": 0,
-      "skips": 0,
-      "tests": 12
-    },
-    "test_php85_security": {
-      "errors": 0,
-      "failures": 0,
-      "skips": 0,
-      "tests": 73
-    },
-    "test_php85_upgrade": {
-      "errors": 0,
-      "failures": 0,
-      "skips": 0,
-      "tests": 166
-    }
+  "source_review": {
+    "build_php85_release.py": "5f7db72909b729c5ff3e6e0bb3539fa4828113b2c94b944f8bcbdec3bf3ec0c5",
+    "php85_config.py": "39bbe801d18e682d3315234ff3686aca54f3a970694cac960ba3a6e7586eb6dc",
+    "php85_upgrade.py": "75fdcd27db3e9d912a495695831b8214c458ec1a156c2d43b1d449ef6911f82d"
   },
-  "tests": 251
+  "tests": 44,
+  "version": "2.0.0"
 }
