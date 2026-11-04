@@ -3520,6 +3520,61 @@ class V105PreinstallRecoveryFixtures(Offline):
         self.assertEqual(result['preserved'],result['old_files'])
 
 
+class VersionComparisonIsolationFixture(unittest.TestCase):
+    def test_fresh_isolated_real_apt_pkg_is_initialized_without_inspect_or_cache(self):
+        source = r'''import apt_pkg,json,runpy,sys
+try:
+    apt_pkg.version_compare('8.5.13','8.5.13')
+except ValueError:
+    initially_uninitialized=True
+else:
+    initially_uninitialized=False
+assert initially_uninitialized
+namespace=runpy.run_path(sys.argv[1],run_name='php85_isolated_fixture')
+def forbidden(*args,**kwargs):
+    raise AssertionError('Cache construction or inspect is forbidden')
+apt_pkg.Cache=forbidden
+namespace['inspect']=forbidden
+namespace['initialize_version_comparison']()
+assert namespace['compare']('8.5.13','8.5.13')==0
+assert namespace['compare']('8.5.13','8.5.12')>0
+assert namespace['compare']('8.5.12','8.5.13')<0
+print(json.dumps(dict(initially_uninitialized=True,initialized_comparison=True,cache_constructed=False)))
+'''
+        result=M.subprocess.run(['/usr/bin/python3','-I','-c',source,str(Path(M.__file__).resolve())],
+            stdout=M.subprocess.PIPE,stderr=M.subprocess.PIPE,timeout=15,
+            env=dict(PATH='/usr/bin:/bin',HOME='/nonexistent',LANG='C',LC_ALL='C'),check=True)
+        self.assertEqual(json.loads(result.stdout),dict(initially_uninitialized=True,initialized_comparison=True,cache_constructed=False))
+
+
+class ExceptionFrameFixtures(Offline):
+    def test_own_frames_include_only_function_and_line_without_messages_locals_or_paths(self):
+        namespace={}
+        exec(compile("def own_visible_frame():\n    private_token='fixture-local-secret'\n    raise RuntimeError('fixture-exception-secret')\n",M.__file__,'exec'),namespace)
+        try:namespace['own_visible_frame']()
+        except RuntimeError as error:details=M.exception_details(error)
+        self.assertEqual(details,dict(exception_frames=[dict(function='own_visible_frame',line=3)]))
+        encoded=json.dumps(details)
+        for secret in ('fixture-local-secret','fixture-exception-secret',M.__file__,'private_token'):
+            self.assertNotIn(secret,encoded)
+
+    def test_external_frames_are_omitted_and_own_frame_count_is_bounded(self):
+        try:raise RuntimeError('external secret')
+        except RuntimeError as error:self.assertEqual(M.exception_details(error),dict(exception_frames=[]))
+        namespace={}
+        exec(compile("def reviewed_frame(depth):\n    if depth:return reviewed_frame(depth-1)\n    raise RuntimeError('hidden secret')\n",'<reviewed-FPM-runtime-proof>','exec'),namespace)
+        try:namespace['reviewed_frame'](20)
+        except RuntimeError as error:details=M.exception_details(error)
+        self.assertEqual(len(details['exception_frames']),12)
+        self.assertTrue(all(set(row)=={'function','line'} and row['function']=='reviewed_frame'
+            and isinstance(row['line'],int) for row in details['exception_frames']))
+        self.assertNotIn('hidden secret',json.dumps(details))
+
+    def test_version_initializer_denies_APT_CONFIG_before_any_apt_initialization(self):
+        with patch.dict(M.os.environ,{'APT_CONFIG':'fixture-private-config'}):
+            self.held('APT_CONFIG_override_forbidden',M.initialize_version_comparison)
+
+
 class DirectPackageIniTransportFixture(unittest.TestCase):
     def test_actual_dpkg_query_reads_only_synthetic_status_DB_and_emits_Conffiles_lines(self):
         raw=b'; priority=25\nextension=redis.so\n';logical='/etc/php/8.5/mods-available/redis.ini'
@@ -4114,6 +4169,7 @@ class ApplyFixtures(Offline):
             selector_modes = {name: alternative_status for name in ('php','phar')}
             timer_active=True
             setup_complete=False
+            version_trace=[]
 
             class FakePath:
                 def __init__(self, value):
@@ -4174,6 +4230,8 @@ class ApplyFixtures(Offline):
                 path = FakePath(path)
                 if setup_complete and continuation_mutation=='save-current-failure' and path.name=='configuration-continuation-original-current.json':
                     raise PermissionError('fixture_private_write_denied')
+                if setup_complete and str(path).startswith('/etc/php/8.5/'):
+                    version_trace.append('target-write')
                 raw = raw.encode() if isinstance(raw, str) else raw
                 path.write_bytes(raw)
                 path.chmod(mode)
@@ -4477,6 +4535,15 @@ class ApplyFixtures(Offline):
                 stack.enter_context(patch.object(M,'_preinstall_runtime',return_value=dict(master_pid=1234,current_native_executable=True)))
                 if hasattr(M,'_configuration_vendor_profiles'):
                     stack.enter_context(patch.object(M,'_configuration_vendor_profiles',return_value=dict(stock_templates_verified=True)))
+                if hasattr(M,'initialize_version_comparison'):
+                    stack.enter_context(patch.object(M,'initialize_version_comparison',side_effect=lambda:version_trace.append('initialize')))
+                if previous_configuration and hasattr(M,'_configuration_after'):
+                    actual_after=M._configuration_after
+                    def configuration_after(p):
+                        self.assertIn('initialize',version_trace,'continuation proof must follow apt initialization')
+                        version_trace.append('proof')
+                        return actual_after(p)
+                    stack.enter_context(patch.object(M,'_configuration_after',side_effect=configuration_after))
                 stack.enter_context(patch.object(M.subprocess, 'run', side_effect=subprocess))
                 stack.enter_context(patch.object(M.os, 'geteuid', return_value=0))
                 stack.enter_context(patch.object(M.os, 'open', side_effect=open_os))
@@ -4488,10 +4555,10 @@ class ApplyFixtures(Offline):
                 if hasattr(M, 'lock_packages'):
                     stack.enter_context(patch.object(M, 'lock_packages', return_value=contextlib.nullcontext()))
                 if hasattr(M, 'package_locks'):
-                    stack.enter_context(patch.object(M, 'package_locks', return_value=[]))
+                    stack.enter_context(patch.object(M, 'package_locks', side_effect=lambda:(version_trace.append('package-locks'),[])[1]))
                 if hasattr(M, 'shared_lock'):
                     stack.enter_context(patch.object(M, 'shared_lock', side_effect=lambda:
-                        actual_os_open(str(physical_root / 'fixture-shared-lock'), M.os.O_RDWR | M.os.O_CREAT, 0o600)))
+                        (version_trace.append('shared-lock'),actual_os_open(str(physical_root / 'fixture-shared-lock'), M.os.O_RDWR | M.os.O_CREAT, 0o600))[1]))
                 try:
                     M.apply()
                 except M.Hold as failure:
@@ -4557,7 +4624,8 @@ class ApplyFixtures(Offline):
                         rollback_plan_before=rollback_plan_before, rollback_plan_after=rollback_plan_after,
                         rollback_seal_before=rollback_seal_before, rollback_seal_after=rollback_seal_after,
                         archived_current=archived_current, preserved_previous=preserved_previous,
-                        preinstall_receipts=preinstall_receipts,continuation_receipts=continuation_receipts)
+                        preinstall_receipts=preinstall_receipts,continuation_receipts=continuation_receipts,
+                        version_trace=version_trace)
 
     def test_full_migration_preserves_pool_permissions_and_distinct_sapi_settings(self):
         result = self.run_apply()
@@ -4635,6 +4703,15 @@ class ApplyFixtures(Offline):
         self.assertEqual(len(result['runtime_calls']),2)
         self.assertIn(['/bin/systemctl','stop','apt-daily.timer'],result['commands'])
         self.assertIn(['/bin/systemctl','start','apt-daily.timer'],result['commands'])
+
+    def test_continuation_initializes_apt_comparison_under_locks_before_proofs_or_target_writes(self):
+        result=self.run_apply(previous_configuration=True)
+        self.assertIsNone(result['error'])
+        trace=result['version_trace'];self.assertEqual(trace.count('initialize'),1)
+        self.assertLess(trace.index('shared-lock'),trace.index('initialize'))
+        self.assertLess(trace.index('package-locks'),trace.index('initialize'))
+        self.assertLess(trace.index('initialize'),trace.index('proof'))
+        self.assertLess(trace.index('proof'),trace.index('target-write'))
 
     def test_v106_evidence_and_partial_target_drift_hold_without_package_or_target_writes(self):
         for mutation in ('logs','hook','code','backup','extra-artifact','pool','global','extra-pool',

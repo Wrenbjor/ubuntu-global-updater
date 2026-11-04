@@ -101,7 +101,7 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.8 retains five narrowly defined automatic preflight recovery cases on the
+Version 1.0.9 retains five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
@@ -212,3 +212,9 @@ includes standard PECL packages that do not ship a separate shared template.
 Canonical module link names and priorities remain required; modified, unowned,
 ambiguous, obsolete or symlinked direct files still hold. No package operation
 is added to the continuation, and repository trust is not changed.
+
+Version 1.0.9 initializes python-apt version comparison explicitly when entering
+the configuration-only continuation, before its proofs or target writes. This
+does not refresh indexes or construct an APT package cache. Unexpected failures
+record only the exception type and bounded updater function/line locations;
+exception messages, local values and source text are omitted.

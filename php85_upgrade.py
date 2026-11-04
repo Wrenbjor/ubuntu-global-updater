@@ -20,7 +20,7 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.8'
+VERSION = '1.0.9'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
@@ -222,6 +222,17 @@ class Hold(Exception):
 def need(condition, reason):
     if not condition:
         raise Hold(reason)
+
+
+def exception_details(error):
+    """Record only our code locations, never exception text, locals or source lines."""
+    frames, trace = [], error.__traceback__
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        if code.co_filename in (__file__, '<reviewed-FPM-runtime-proof>'):
+            frames.append(dict(function=code.co_name, line=trace.tb_lineno))
+        trace = trace.tb_next
+    return dict(exception_frames=frames[-12:])
 
 
 def digest(raw):
@@ -1090,6 +1101,13 @@ def candidate(cache, name, host):
 def compare(a, b):
     import apt_pkg
     return apt_pkg.version_compare(a, b)
+
+
+def initialize_version_comparison():
+    """Initialize process-local python-apt state without opening or updating a cache."""
+    need(not os.environ.get('APT_CONFIG'), 'APT_CONFIG_override_forbidden')
+    import apt_pkg
+    apt_pkg.init()
 
 
 def simulated_changes(text, before, cache, host):
@@ -2238,6 +2256,7 @@ def continue_v106_configuration(previous):
         shared = shared_lock()
         held = package_locks()
         timers = _preinstall_json(job / 'timers.json')
+        initialize_version_comparison()
         after = _configuration_after(plan)
         proof = _configuration_partial(plan, job, after, timers, values, modes)
         need(_preinstall_inventory(job) == original_files and safe_file(BASE / 'current.json', True) == raw_current,
@@ -2280,7 +2299,8 @@ def continue_v106_configuration(previous):
             journal = journal or Journal(job)
             journal.phase('configuration_continuation_failed_needs_review',
                           reason=str(error) if isinstance(error, Hold) else type(error).__name__,
-                          recovery=str(job / 'recovery.json'), continuation_receipt=str(receipt_path))
+                          recovery=str(job / 'recovery.json'), continuation_receipt=str(receipt_path),
+                          details=getattr(error, 'details', {}) if isinstance(error, Hold) else exception_details(error))
         raise
     finally:
         try:
@@ -2540,7 +2560,7 @@ def apply():
         except BaseException as error:
             journal.phase('failed_needs_review', reason=str(error) if isinstance(error, Hold) else type(error).__name__,
                           recovery=str(job / 'recovery.json') if (job / 'recovery.json').exists() else None,
-                          details=getattr(error, 'details', {}))
+                          details=getattr(error, 'details', {}) if isinstance(error, Hold) else exception_details(error))
             raise
         finally:
             cleanup_errors = []
@@ -2609,5 +2629,5 @@ if __name__ == '__main__':
         print(json.dumps(dict(status='held', reason=str(error), details=getattr(error, 'details', {}))), file=sys.stderr)
         sys.exit(1)
     except Exception as error:
-        print(json.dumps(dict(status='failed', reason=type(error).__name__)), file=sys.stderr)
+        print(json.dumps(dict(status='failed', reason=type(error).__name__, details=exception_details(error))), file=sys.stderr)
         sys.exit(1)
