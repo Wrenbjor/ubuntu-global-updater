@@ -4659,6 +4659,122 @@ class V105PreinstallRecoveryFixtures(Offline):
         self.assertEqual(result['preserved'],result['old_files'])
 
 
+class StreamedVendorFileFixtures(Offline):
+    @contextlib.contextmanager
+    def large_file(self):
+        with tempfile.TemporaryDirectory(prefix='php85-streamed-vendor-') as temporary:
+            root=Path(temporary);root.chmod(0o700)
+            target=root/'usr/sbin/fixture-mysqld';target.parent.mkdir(parents=True)
+            block=b'fixture executable bytes only; never executed\n'*20000
+            size=17*1024*1024+123;left=size;md5=M.hashlib.md5(usedforsecurity=False);sha=M.hashlib.sha256()
+            with target.open('wb') as stream:
+                while left:
+                    chunk=block[:min(left,len(block))];stream.write(chunk);md5.update(chunk);sha.update(chunk);left-=len(chunk)
+            target.chmod(0o755)
+            with patch.object(M,'_SECURITY_ROOT',root),patch.object(M,'_SECURITY_UID',root.stat().st_uid):
+                yield root,target,md5.hexdigest(),sha.hexdigest(),size
+
+    @contextlib.contextmanager
+    def observe_stream(self,target,mutation=None):
+        actual_fdopen=M.os.fdopen;reads=[];fds=[];mutated=False
+        class Reader:
+            def __init__(self,stream):self.stream=stream
+            def __enter__(self):self.stream.__enter__();return self
+            def __exit__(self,*args):return self.stream.__exit__(*args)
+            def fileno(self):return self.stream.fileno()
+            def read(inner,size=-1):
+                nonlocal mutated
+                self.assertGreater(size,0);self.assertLessEqual(size,1024*1024);reads.append(size)
+                if mutation=='read-failure':raise OSError('fixture read failure')
+                raw=inner.stream.read(size)
+                if not raw and callable(mutation) and not mutated:mutated=True;mutation()
+                return raw
+        def fdopen(fd,*args,**kwargs):
+            if Path(M.os.readlink('/proc/self/fd/'+str(fd)))==target:
+                fds.append(fd)
+                if mutation=='fdopen-failure':raise OSError('fixture fdopen failure')
+                return Reader(actual_fdopen(fd,*args,**kwargs))
+            return actual_fdopen(fd,*args,**kwargs)
+        with patch.object(M.os,'fdopen',side_effect=fdopen):yield reads,fds
+
+    def assert_closed(self,fds):
+        self.assertTrue(fds)
+        for fd in fds:
+            with self.assertRaises(OSError):M.os.fstat(fd)
+
+    def test_real_large_executable_streams_bounded_chunks_and_config_read_cap_stays_16MiB(self):
+        with self.large_file() as (root,target,md5,sha,size):
+            with self.assertRaises(M.Hold) as caught:M.safe_file(target)
+            self.assertEqual(str(caught.exception),'file_too_large')
+            self.assertEqual(caught.exception.details,dict(requested_path=str(target),bytes=size,limit_bytes=16*1024*1024))
+            with self.observe_stream(target) as (reads,fds):checksum,metadata=M._file_record(target,hash_name='md5')
+            self.assertEqual(checksum,md5);self.assertEqual(metadata['sha256'],sha)
+            self.assertGreater(len(reads),17);self.assert_closed(fds)
+
+    def test_real_large_vendor_file_matches_synthetic_installed_inventory_and_wrong_hash_holds(self):
+        for mismatch in (False,True):
+            with self.subTest(mismatch=mismatch),self.large_file() as (root,target,md5,sha,size):
+                inventory=root/'var/lib/dpkg/info/mysql-community-server-core.md5sums';inventory.parent.mkdir(parents=True)
+                inventory.write_text(('0'*32 if mismatch else md5)+'  '+str(target).lstrip('/')+'\n');inventory.chmod(0o600)
+                native=Path;real_safe=M.safe_file
+                def paths(value):
+                    value=str(value)
+                    return root/value.lstrip('/') if value.startswith('/var/lib/dpkg/info/') else native(value)
+                def read(path,*args):
+                    self.assertNotEqual(native(path),target,'vendor executable must not use the raw safe_file buffer')
+                    return real_safe(path,*args)
+                with patch.object(M,'Path',side_effect=paths),patch.object(M,'safe_file',side_effect=read),\
+                     patch.object(M,'command',return_value='amd64\n') as command:
+                    if mismatch:self.held('vendor_file_modified_requires_review',M.installed_vendor_file,'mysql-community-server-core',str(target))
+                    else:M.installed_vendor_file('mysql-community-server-core',str(target))
+                    command.assert_called_once_with(['/usr/bin/dpkg','--print-architecture'])
+
+    def test_inplace_path_replacement_and_alias_mutation_after_EOF_never_pass(self):
+        for mutation in ('inplace','replace','alias'):
+            with self.subTest(mutation=mutation),self.large_file() as (root,target,md5,sha,size):
+                logical=target
+                if mutation=='alias':logical=root/'usr/sbin/vendor-alias';logical.symlink_to(target.name)
+                def change():
+                    if mutation=='inplace':
+                        with target.open('r+b') as stream:stream.write(b'changed')
+                    elif mutation=='replace':
+                        replacement=target.with_name('replacement');replacement.write_bytes(b'foreign inode');replacement.chmod(0o755);replacement.replace(target)
+                    else:
+                        other=target.with_name('other');other.write_bytes(b'foreign alias target');other.chmod(0o755)
+                        logical.unlink();logical.symlink_to(other.name)
+                with self.observe_stream(target,change) as (reads,fds):
+                    with self.assertRaises(M.Hold):M._file_record(logical,hash_name='md5')
+                self.assert_closed(fds)
+
+    def test_fifo_replacement_between_lstat_and_open_is_nonblocking_and_never_read(self):
+        with self.large_file() as (root,target,md5,sha,size):
+            real_open=M.os.open
+            def opening(path,flags,*args,**kwargs):
+                if str(path)==str(target):
+                    self.assertTrue(flags&M.os.O_NONBLOCK);self.assertTrue(flags&M.os.O_NOFOLLOW)
+                    target.unlink();M.os.mkfifo(target,0o600)
+                return real_open(path,flags,*args,**kwargs)
+            with self.observe_stream(target) as (reads,fds),patch.object(M.os,'open',side_effect=opening):
+                self.held('file_changed_during_read',M._file_record,target,hash_name='md5')
+            self.assertEqual(reads,[]);self.assert_closed(fds)
+
+    def test_fdopen_or_read_failure_closes_owned_descriptor(self):
+        for failure in ('fdopen-failure','read-failure'):
+            with self.subTest(failure=failure),self.large_file() as (root,target,md5,sha,size):
+                with self.observe_stream(target,failure) as (reads,fds):
+                    with self.assertRaises(OSError):M._file_record(target,hash_name='md5')
+                self.assert_closed(fds)
+
+    def test_sparse_vendor_oversize_and_unsafe_mode_hold_before_any_read(self):
+        with self.large_file() as (root,target,md5,sha,size):
+            target.chmod(0o777);self.held('unsafe_file',M._file_record,target,hash_name='md5');target.chmod(0o755)
+            with target.open('wb') as stream:stream.truncate(1024*1024*1024+1)
+            with patch.object(M.os,'open',side_effect=AssertionError('oversized file must not be opened')):
+                with self.assertRaises(M.Hold) as caught:M._file_record(target,hash_name='md5')
+            self.assertEqual(str(caught.exception),'file_too_large')
+            self.assertEqual(caught.exception.details['limit_bytes'],1024*1024*1024)
+
+
 class VersionComparisonIsolationFixture(unittest.TestCase):
     def test_fresh_isolated_real_apt_pkg_is_initialized_without_inspect_or_cache(self):
         source = r'''import apt_pkg,json,runpy,sys
@@ -4831,8 +4947,11 @@ class DirectPackageIniFixtures(Offline):
             if args==['/usr/bin/dpkg-query','-W','-f=${Conffiles}\\n',package]:return conffiles
             if args==['/usr/bin/dpkg','--print-architecture']:return 'amd64\n'
             raise AssertionError('unapproved fixture command '+repr(args))
+        def file_record(request,private=False,*,hash_name=None):
+            self.assertEqual(hash_name,'md5');raw=safe_read(request)
+            return M.hashlib.md5(raw,usedforsecurity=False).hexdigest(),dict(sha256=M.digest(raw))
         with patch.object(M,'Path',IniPath),patch.object(M,'safe_file',side_effect=safe_read),\
-             patch.object(M,'command',side_effect=command):
+             patch.object(M,'command',side_effect=command),patch.object(M,'_file_record',side_effect=file_record):
             result=M.installed_package_INI(package,path)
         self.assertEqual(result,raw);return commands
 

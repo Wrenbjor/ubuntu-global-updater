@@ -805,11 +805,12 @@ class VendorAndUnitGuards(unittest.TestCase):
   raw=b'packaged binary';checksum=M.hashlib.md5(raw,usedforsecurity=False).hexdigest()
   def read(path,*args):return (checksum+'  usr/bin/php8.3\n').encode() if str(path).endswith('.md5sums') else raw
   def exists(path):return str(path)=='/var/lib/dpkg/info/php8.3-cli.md5sums'
-  with patch.object(M,'safe_file',side_effect=read),patch.object(M,'command',return_value='amd64\n'),patch.object(Path,'is_file',exists),patch.object(Path,'resolve',lambda path:path):
+  with patch.object(M,'_file_record',return_value=(checksum,{})) as record,patch.object(M,'safe_file',side_effect=read),patch.object(M,'command',return_value='amd64\n'),patch.object(Path,'is_file',exists),patch.object(Path,'resolve',lambda path:path):
    M.installed_vendor_file('php8.3-cli','/usr/bin/php8.3')
+   record.assert_called_once_with('/usr/bin/php8.3',hash_name='md5')
    with patch.object(M,'safe_file',side_effect=lambda p,*args:('0'*32+'  usr/bin/php8.3\n').encode() if str(p).endswith('.md5sums') else raw):
     with self.assertRaisesRegex(M.Hold,'vendor_file_modified'):M.installed_vendor_file('php8.3-cli','/usr/bin/php8.3')
-  with patch.object(M,'safe_file',return_value=raw),patch.object(M,'command',return_value='amd64'),patch.object(Path,'is_file',return_value=True):
+  with patch.object(M,'_file_record',return_value=(checksum,{})),patch.object(M,'safe_file',return_value=raw),patch.object(M,'command',return_value='amd64'),patch.object(Path,'is_file',return_value=True):
    with self.assertRaisesRegex(M.Hold,'ambiguous'):M.installed_vendor_file('php8.3-cli','/usr/bin/php8.3')
  def loader_command(self,args,**kwargs):
   if args[0]=='/usr/bin/php8.3':return '/usr/lib/php/20230831'

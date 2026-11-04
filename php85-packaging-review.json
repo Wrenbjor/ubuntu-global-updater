@@ -2,20 +2,20 @@
   "actual_APT_or_service_actions": 0,
   "actual_PHP_or_FPM_executed": false,
   "artifact_sha256": {
-    "README-php85.md": "0b328e2832ac0cfab08057b3299d22b953dc819915255356288bd8554ae15de9",
-    "php85.sh": "e2e596db99214391205e39630c5784c657fcb13752c316113da2679554357215",
-    "php85_upgrade.py": "beeecf1e59f04dbe2742d78cb7f8902e0ba462033baa729c8fb22087b8996a35"
+    "README-php85.md": "cc60a1a97a00eca8609020a687277892d6e19e1fb9387037f1a4b0387bfe833e",
+    "php85.sh": "4464ee73c8ffb6c45945ea63ca543e188fef1d321f6fa5d006c474778a619fa6",
+    "php85_upgrade.py": "c60f09624a8f4a27aa33c45223a2c7cf49be7aa2a868bf740ce5f53b2664a8b2"
   },
   "bootstrap": {
-    "bytes": 65425,
-    "core_sha256": "beeecf1e59f04dbe2742d78cb7f8902e0ba462033baa729c8fb22087b8996a35",
+    "bytes": 65737,
+    "core_sha256": "c60f09624a8f4a27aa33c45223a2c7cf49be7aa2a868bf740ce5f53b2664a8b2",
     "embedded_payload_verified": true,
     "production_actions": 0,
-    "shell_sha256": "e2e596db99214391205e39630c5784c657fcb13752c316113da2679554357215",
+    "shell_sha256": "4464ee73c8ffb6c45945ea63ca543e188fef1d321f6fa5d006c474778a619fa6",
     "status": "built-local-only",
-    "version": "1.0.11"
+    "version": "1.0.12"
   },
-  "builder_sha256": "a0cb432bda2558c0479d6aa5bd413dc8a84d7252ca1037e3298076830ba2a301",
+  "builder_sha256": "4965788c6cb5a65ad320e81c8df92ae8b2b285d14eaa393f04aa75fec2f70eee",
   "checks": {
     "bash_syntax": true,
     "compressed_and_payload_SHA256": true,
@@ -49,5 +49,5 @@
   "review_scope": "local-bootstrap-packaging-only",
   "schema": 1,
   "status": "PASS",
-  "version": "1.0.11"
+  "version": "1.0.12"
 }

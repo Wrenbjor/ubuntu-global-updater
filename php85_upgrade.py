@@ -20,7 +20,7 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.11'
+VERSION = '1.0.12'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
@@ -279,7 +279,8 @@ def _safe_parents(path, requested=None):
     return path, []
 
 
-def _file_record(path, private=False):
+def _file_record(path, private=False, *, hash_name=None):
+    need(hash_name in (None, 'md5'), 'unsupported_file_hash')
     p = Path(path)
     cursor, parent_aliases = _safe_parents(p)
     logical = p.lstat()
@@ -306,18 +307,48 @@ def _file_record(path, private=False):
     need(stat.S_ISREG(before.st_mode) and before.st_uid == _SECURITY_UID
          and not before.st_mode & 0o022 and before.st_nlink == 1, 'unsafe_file')
     need(not private or before.st_mode & 0o077 == 0, 'private_file_required')
-    need(before.st_size <= 16 * 1024 * 1024, 'file_too_large')
+    limit = (1024 if hash_name else 16) * 1024 * 1024
+    if before.st_size > limit:
+        error = Hold('file_too_large')
+        error.details = dict(requested_path=str(p), bytes=before.st_size, limit_bytes=limit)
+        raise error
     need(not hasattr(os, 'listxattr') or not os.listxattr(resolved), 'file_xattrs_require_preservation_profile')
-    fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, 'rb') as stream:
+    fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        stream = os.fdopen(fd, 'rb')
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    with stream:
         opened = os.fstat(stream.fileno())
-        raw = stream.read(16 * 1024 * 1024 + 1)
-    need(len(raw) <= 16 * 1024 * 1024 and _file_identity(before) == _file_identity(opened)
+        need(_file_identity(before) == _file_identity(opened), 'file_changed_during_read')
+        if hash_name:
+            checksum = hashlib.md5(usedforsecurity=False)
+            sha256 = hashlib.sha256()
+            size = 0
+            while True:
+                chunk = stream.read(min(1024 * 1024, limit + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                need(size <= limit, 'file_changed_during_read')
+                checksum.update(chunk)
+                sha256.update(chunk)
+            raw, sha = checksum.hexdigest(), sha256.hexdigest()
+        else:
+            raw = stream.read(limit + 1)
+            size, sha = len(raw), digest(raw)
+        finished = os.fstat(stream.fileno())
+    need(size <= limit and size == before.st_size
+         and _file_identity(before) == _file_identity(opened) == _file_identity(finished)
          == _file_identity(resolved.lstat()) and _file_identity(logical) == _file_identity(p.lstat())
          and p.resolve(strict=True) == resolved, 'file_changed_during_read')
     need(all(_file_identity(alias.lstat()) == identity and os.readlink(alias) == target
              for alias, identity, target in aliases), 'file_alias_changed_during_read')
-    return raw, dict(sha256=digest(raw), link=link, resolved=str(resolved),
+    return raw, dict(sha256=sha, link=link, resolved=str(resolved),
         uid=opened.st_uid, gid=opened.st_gid, mode=stat.S_IMODE(opened.st_mode),
         link_uid=logical.st_uid, link_inode=logical.st_ino if link is not None else None,
         parent_aliases=[dict(path=str(alias), identity=list(identity), target=target)
@@ -996,7 +1027,7 @@ def global_FPM_output(text, branch):
 def installed_vendor_file(package, path):
     """Check local package-file inventory; repository/archive trust is verified separately."""
     need(NAME.fullmatch(package) is not None, 'invalid_vendor_package')
-    raw = safe_file(path)
+    checksum = _file_record(path, hash_name='md5')[0]
     arch = command(['/usr/bin/dpkg', '--print-architecture']).strip()
     inventories = [p for p in (Path('/var/lib/dpkg/info/' + package + '.md5sums'),
                    Path('/var/lib/dpkg/info/' + package + ':' + arch + '.md5sums')) if p.is_file()]
@@ -1006,7 +1037,7 @@ def installed_vendor_file(package, path):
         fields = line.split(None, 1)
         if len(fields) == 2 and Path('/' + fields[1]).resolve() == Path(path).resolve():
             matched.append(fields[0])
-    need(len(matched) == 1 and hashlib.md5(raw, usedforsecurity=False).hexdigest() == matched[0], 'vendor_file_modified_requires_review')
+    need(len(matched) == 1 and checksum == matched[0], 'vendor_file_modified_requires_review')
 
 
 def validate_loaders(branch, profiles, before):

@@ -101,7 +101,7 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.11 retains five narrowly defined automatic preflight recovery cases on the
+Version 1.0.12 retains five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
@@ -267,3 +267,13 @@ package transaction is retained and is not replayed. Changed evidence, partial
 continuation receipts and every other failed-job shape still require inspection.
 Unknown preserved jobs report only bounded saved version, phase and reason
 identifiers; private job contents are not printed as failure diagnostics.
+
+Version 1.0.12 hashes installed vendor files in bounded chunks instead of
+loading executables into the configuration-text buffer. Package-file MD5
+comparison and SHA-256 metadata retain the same ownership, permissions, alias,
+opened-inode and before/after stability checks. Vendor hashing has a separate
+1 GiB limit; ordinary configuration and state reads retain their 16 MiB limit.
+This supports large native executables without relaxing configuration-file
+limits or adding recovery cases. Oversize holds report only the requested path,
+size and applicable limit. It does not establish the cause of an uninspected
+production error.
