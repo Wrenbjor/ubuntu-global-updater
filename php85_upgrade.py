@@ -20,7 +20,7 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.10'
+VERSION = '1.0.11'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
@@ -1569,7 +1569,16 @@ def recover_v100_preflight(previous):
         '1.0.3': (PREFLIGHT_V103_SHA256, 'unsafe_file_parent', True),
         '1.0.4': (PREFLIGHT_V104_SHA256, 'command_failed_gpgv', True),
     }
-    need(previous.get('version') in cases, 'previous_job_preserved_use_status')
+    if previous.get('version') not in cases:
+        error = Hold('previous_job_preserved_use_status')
+        error.details = {}
+        for key, pattern in (('version', r'[0-9]+\.[0-9]+\.[0-9]+'),
+                             ('phase', r'[A-Za-z][A-Za-z0-9_]{0,95}'),
+                             ('reason', r'[A-Za-z][A-Za-z0-9_]{0,127}')):
+            value = previous.get(key)
+            if isinstance(value, str) and len(value) <= 128 and (key != 'version' or len(value) <= 64) and re.fullmatch(pattern, value):
+                error.details['saved_' + key] = value
+        raise error
     code_sha, reason, has_details = cases[previous['version']]
     fields = {'version', 'job', 'phase', 'event_sha256', 'reason', 'recovery'}
     if has_details:
@@ -2436,8 +2445,12 @@ def verified_vendor_socket(plan, after):
     owners = command(['/usr/bin/dpkg-query', '-S', str(executable)]).splitlines()
     need(len(owners) == 1 and ': ' in owners[0], 'socket_adoption_database_package_ambiguous')
     owner = owners[0].split(': ', 1)[0].split(':', 1)[0]
-    need(owner in after and owner.startswith(('mysql-server-core', 'mariadb-server-core')),
-         'socket_adoption_database_package_unapproved')
+    allowed_owner = (owner.startswith(('mysql-server-core', 'mariadb-server-core'))
+                     or owner == 'mysql-community-server-core' and listener['name'] == 'mysqld')
+    if owner not in after or not allowed_owner:
+        error = Hold('socket_adoption_database_package_unapproved')
+        error.details = dict(executable=str(executable), package_owner=owner if NAME.fullmatch(owner) else 'unrecognized')
+        raise error
     installed_vendor_file(owner, str(executable))
     disk, live = executable.stat(), (process / 'exe').stat()
     need((disk.st_dev, disk.st_ino) == (live.st_dev, live.st_ino), 'socket_adoption_database_executable_stale')
@@ -2772,7 +2785,284 @@ def continue_v109_configuration(previous, adopt_vendor_socket=False):
                 os.close(shared)
 
 
-def finish_configuration(plan, job, journal, alternatives, alternative_modes, after, prepared=False, adopt_vendor_socket=False):
+PRECONFIG_V110_SHA256 = '531a00fcd30186c16e1c7c6eb3fee7796ac3bdb0c482b504d1574d27da6d3992'
+
+
+def _preconfiguration_stock_fpm():
+    package = 'php8.5-fpm'
+    paths = command(['/usr/bin/dpkg-query', '-L', package]).splitlines()
+    conffiles = {}
+    for line in command(['/usr/bin/dpkg-query', '-W', '-f=${Conffiles}\n', package]).splitlines():
+        fields = line.split()
+        if fields:
+            need(fields[0] not in conffiles, 'preconfiguration_duplicate_conffile')
+            conffiles[fields[0]] = fields
+    observed = {}
+    for path in ('/etc/php/8.5/fpm/php-fpm.conf', '/etc/php/8.5/fpm/pool.d/www.conf'):
+        need(not Path(path).is_symlink(), 'preconfiguration_target_FPM_alias')
+        raw = safe_file(path)
+        candidates = [p for p in paths if p.startswith('/usr/share/') and Path(p).name == Path(path).name]
+        matched = []
+        for template in candidates:
+            installed_vendor_file(package, template)
+            if safe_file(template) == raw:
+                matched.append(template)
+        if candidates:
+            need(len(matched) == 1, 'preconfiguration_target_FPM_not_unique_vendor_template')
+        else:
+            row = conffiles.get(path)
+            need(path in paths and row is not None and len(row) == 2
+                 and re.fullmatch(r'[0-9a-f]{32}', row[1])
+                 and hashlib.md5(raw, usedforsecurity=False).hexdigest() == row[1],
+                 'preconfiguration_target_FPM_not_vendor_default')
+        observed[path] = files_snapshot([path])[path]
+        need(observed[path]['sha256'] == digest(raw), 'preconfiguration_stock_FPM_changed_during_capture')
+    need({p.name for p in Path('/etc/php/8.5/fpm/pool.d').iterdir()} == {'www.conf'},
+         'preconfiguration_target_pool_inventory_changed')
+    return observed
+
+
+def _preconfiguration_baseline(plan, after, timers, values, modes):
+    need(identity() == plan['host'] and source_files() == plan['sources']
+         and files_snapshot(plan['files']) == plan['files'], 'preconfiguration_original_baseline_changed')
+    need(_configuration_after(plan) == after, 'preconfiguration_packages_changed')
+    need(Path('/usr/bin/php').resolve() == Path('/usr/bin/php7.4').resolve(), 'preconfiguration_default_CLI_changed')
+    validate_loaders('7.4', plan['INI_files'], after)
+    need(registry('7.4') == plan['source_CLI_registry'] and registry('7.4', True) == plan['source_registry'],
+         'preconfiguration_source_registry_changed')
+    unit = validate_native_unit('7.4', True)
+    need(unit in plan['files'] and unit_enabled('7.4') is plan['source_enabled'], 'preconfiguration_source_unit_changed')
+    _preinstall_runtime('7.4')
+    command(['/bin/systemctl', 'is-active', '--quiet', 'nginx.service'])
+    _configuration_selectors(values, modes)
+    _preinstall_timers(timers)
+    need(not Path('/usr/sbin/policy-rc.d').exists() and not Path('/usr/sbin/policy-rc.d').is_symlink(),
+         'preconfiguration_policy_present')
+    target_unit = validate_native_unit(TARGET)
+    need(command(['/bin/systemctl', 'show', 'php8.5-fpm.service', '-p', 'ActiveState', '--value']).strip() == 'inactive'
+         and command(['/bin/systemctl', 'show', 'php8.5-fpm.service', '-p', 'MainPID', '--value']).strip() == '0',
+         'preconfiguration_target_not_inactive')
+    profiles = {}
+    for sapi in ('cli', 'fpm'):
+        migration = Path('/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini')
+        need(not migration.exists() and not migration.is_symlink(), 'preconfiguration_migration_INI_present')
+        paths = ['/etc/php/8.5/' + sapi + '/php.ini'] + sorted(glob.glob('/etc/php/8.5/' + sapi + '/conf.d/*.ini'))
+        profiles[sapi] = {p: safe_file(p).decode() for p in paths}
+        executable_INI_guard(profiles[sapi])
+    _configuration_vendor_profiles(profiles, after)
+    validate_loaders(TARGET, profiles, after)
+    target_files = _preconfiguration_stock_fpm()
+    for settings in profiles.values():
+        snapshots = files_snapshot(settings)
+        need(all(snapshots[p]['sha256'] == digest(text.encode()) for p, text in settings.items()),
+             'preconfiguration_stock_INI_changed_during_capture')
+        target_files.update(snapshots)
+    target_files.update(files_snapshot([target_unit]))
+    socket = verified_vendor_socket(plan, after)
+    need(set(socket.get('socket_overrides', {})) == {'cli', 'fpm'}
+         and socket.get('proof', {}).get('explicit_adoption') is True
+         and socket['proof'].get('database_package') == 'mysql-community-server-core',
+         'preconfiguration_socket_adoption_unavailable')
+    for sapi, old in (('fpm', plan['source_registry']), ('cli', plan['source_CLI_registry'])):
+        target = registry(TARGET, sapi == 'fpm')
+        need(compare(target['version'], FLOOR) >= 0, 'preconfiguration_target_below_floor')
+        ini_output(old, target, plan['INI_files'][sapi], socket_override=socket['socket_overrides'][sapi])
+    health(plan['nginx']['health'])
+    return dict(target_files=target_files, socket=socket)
+
+
+def verify_preconfiguration_journals():
+    for path in BASE.glob('preconfiguration-recovery-*.json'):
+        receipt = _preinstall_json(path)
+        need(receipt.get('schema') == 1 and receipt.get('phase') == 'complete', 'unfinished_preconfiguration_preserved')
+        job = Path(receipt.get('job', ''))
+        _preinstall_job(job)
+        need(path == BASE / ('preconfiguration-recovery-' + job.name + '.json'), 'invalid_preconfiguration_receipt')
+        plan = _preinstall_json(job / 'plan.json')
+        original_names = {'php85_upgrade.py', 'events.jsonl', 'timers.json', 'plan.json', 'plan.sha256', 'recovery.json',
+            'alternatives.json', 'alternative-modes.json', 'apt-hook', 'hook-accepted.json', 'apt-install.stdout', 'apt-install.stderr'}
+        original_names.update('configuration-' + str(i) for i in range(len(plan['files'])))
+        need(set(receipt['original_files']) == original_names
+             and receipt['original_files']['php85_upgrade.py'] == PRECONFIG_V110_SHA256
+             and receipt['plan_sha256'] == digest(encoded(plan)) and plan.get('version') == '1.0.10'
+             and plan.get('code_sha256') == PRECONFIG_V110_SHA256 and plan.get('adopt_vendor_socket') is True,
+             'preconfiguration_original_inventory_changed')
+        for name, sha in receipt['original_files'].items():
+            raw = safe_file(job / name, True)
+            if name == 'events.jsonl':
+                raw = raw[:receipt['original_event_bytes']]
+            need(digest(raw) == sha, 'preconfiguration_original_evidence_changed')
+        names = {'preconfiguration-original-current.json', 'preconfiguration-source.py', 'target-default-www.conf',
+                 'target-default-global.conf', 'vendor-socket-proof.json', 'runtime-before-cutover.json',
+                 'runtime-after-cutover.json', 'verification.json', 'owned-Nginx-edits.json'}
+        need(set(receipt['completion_files']) == names
+             and receipt['completion_files']['preconfiguration-original-current.json'] == receipt['original_current_sha256']
+             and receipt['completion_files']['preconfiguration-source.py'] == receipt['new_source_sha256'],
+             'preconfiguration_completion_inventory_changed')
+        for name, sha in receipt['completion_files'].items():
+            need(digest(safe_file(job / name, True)) == sha, 'preconfiguration_completion_proof_changed')
+        need(receipt['completion_files']['target-default-www.conf'] ==
+             receipt['before']['target_files']['/etc/php/8.5/fpm/pool.d/www.conf']['sha256']
+             and receipt['completion_files']['target-default-global.conf'] ==
+             receipt['before']['target_files']['/etc/php/8.5/fpm/php-fpm.conf']['sha256'],
+             'preconfiguration_distribution_backups_changed')
+        need(_preinstall_json(job / 'vendor-socket-proof.json') == receipt['before']['socket']['proof']
+             and receipt['explicit_vendor_socket_adoption'] is True
+             and receipt['before']['socket']['proof'].get('explicit_adoption') is True,
+             'preconfiguration_socket_adoption_proof_changed')
+        raw, rows, last = _postconfig_events(job)
+        need(last == receipt['completion_event_sha256'] and [r['phase'] for r in rows[8:]] ==
+             ['preconfiguration_only_continuation', 'target_configuration', 'Nginx_cutover', 'web_verification', 'complete']
+             and rows[8].get('APT_replayed') is False and rows[8].get('explicit_vendor_socket_adoption') is True,
+             'preconfiguration_final_journal_changed')
+        verification = _preinstall_json(job / 'verification.json')
+        need(verification.get('web_smoke_checks') is True and verification.get('application_compatibility_claim') is False
+             and verification.get('Nginx_sockets') == sorted(plan['socket_map'].values()),
+             'preconfiguration_final_verification_changed')
+        for name in ('runtime-before-cutover.json', 'runtime-after-cutover.json'):
+            proof = _preinstall_json(job / name)
+            need(isinstance(proof, dict) and proof, 'preconfiguration_runtime_proof_missing')
+
+
+def continue_v110_preconfiguration(previous, adopt_vendor_socket=False):
+    need(adopt_vendor_socket is True, 'explicit_adopt_vendor_socket_required')
+    need(set(previous) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'details', 'recovery'}
+         and previous['version'] == '1.0.10' and previous['phase'] == 'failed_needs_review'
+         and previous['reason'] == 'socket_adoption_database_package_unapproved' and previous['details'] == {},
+         'preconfiguration_unrecognized_failure')
+    job = Path(previous['job'])
+    _preinstall_job(job)
+    need(previous['recovery'] == str(job / 'recovery.json'), 'preconfiguration_recovery_pointer_changed')
+    verify_preflight_archive_journals()
+    verify_preinstall_recovery_journals()
+    verify_configuration_continuation_journals()
+    verify_postconfiguration_journals()
+    verify_preconfiguration_journals()
+    raw_current = safe_file(BASE / 'current.json', True)
+    need(_preinstall_json(BASE / 'current.json') == previous, 'preconfiguration_current_changed')
+    plan_raw, plan = safe_file(job / 'plan.json', True), _preinstall_json(job / 'plan.json')
+    need(plan_raw == encoded(plan) and safe_file(job / 'plan.sha256', True).decode() == digest(plan_raw) + '\n'
+         and plan.get('schema') == 1 and plan.get('version') == '1.0.10'
+         and plan.get('code_sha256') == PRECONFIG_V110_SHA256 and plan.get('source_branch') == '7.4'
+         and plan.get('mode') == 'migration' and plan.get('adopt_vendor_socket') is True
+         and plan.get('changes') and digest(safe_file(job / 'php85_upgrade.py', True)) == PRECONFIG_V110_SHA256,
+         'preconfiguration_source_or_plan_changed')
+    names = {'php85_upgrade.py', 'events.jsonl', 'timers.json', 'plan.json', 'plan.sha256', 'recovery.json',
+             'alternatives.json', 'alternative-modes.json', 'apt-hook', 'hook-accepted.json', 'apt-install.stdout', 'apt-install.stderr'}
+    names.update('configuration-' + str(i) for i in range(len(plan['files'])))
+    need({p.name for p in job.iterdir()} == names, 'preconfiguration_unrecognized_artifacts')
+    original = _preinstall_inventory(job)
+    for i, (path, row) in enumerate(sorted(plan['files'].items())):
+        need(digest(safe_file(job / ('configuration-' + str(i)), True)) == row['sha256'], 'preconfiguration_backup_changed')
+    recovery = _preinstall_json(job / 'recovery.json')
+    need(set(recovery) == {'files', 'old_service', 'old_cli'} and recovery['files'] == plan['files']
+         and recovery['old_service'] == 'php7.4-fpm.service', 'preconfiguration_recovery_changed')
+    values, modes = _preinstall_json(job / 'alternatives.json'), _preinstall_json(job / 'alternative-modes.json')
+    old_cli = _preinstall_fields(recovery['old_cli'])
+    need(old_cli['Name'] == 'php' and old_cli['Value'] == values.get('php') and old_cli['Status'] == modes.get('php'),
+         'preconfiguration_selector_receipts_disagree')
+    events_raw, rows, last = _postconfig_events(job)
+    need([r['phase'] for r in rows] == ['preflight', 'refreshing_indexes', 'plan_sealed', 'downloading_packages',
+         'installing_packages', 'APT_install_exited', 'target_configuration', 'failed_needs_review']
+         and last == previous['event_sha256'], 'preconfiguration_unrecognized_event_stages')
+    common = {'time', 'phase', 'previous_sha256'}
+    need(all(set(rows[i]) == common for i in (0, 1, 3, 4, 6))
+         and set(rows[2]) == common | {'source', 'target', 'changed_packages', 'plan_sha256'}
+         and rows[2]['source'] == '7.4' and rows[2]['target'] == TARGET
+         and rows[2]['changed_packages'] == sorted(plan['changes']) and rows[2]['plan_sha256'] == digest(plan_raw)
+         and set(rows[5]) == common | {'exit_code', 'logs'} and rows[5]['exit_code'] == 0
+         and set(rows[7]) == common | {'reason', 'details', 'recovery'}
+         and all(rows[7][k] == previous[k] for k in ('reason', 'details', 'recovery')),
+         'preconfiguration_event_fields_changed')
+    logs = []
+    for name in ('apt-install.stdout', 'apt-install.stderr'):
+        raw = safe_file(job / name, True)
+        logs.append(dict(path=str(job / name), sha256=digest(raw), bytes=len(raw)))
+    need(rows[5]['logs'] == logs and _preinstall_json(job / 'hook-accepted.json') ==
+         dict(accepted=True, plan_sha256=digest(plan_raw)), 'preconfiguration_APT_proof_changed')
+    hook = ('#!/bin/sh\nexec /usr/bin/python3 -I ' + str(job / 'php85_upgrade.py') +
+            ' --apt-hook ' + str(job / 'plan.json') + '\n').encode()
+    need(safe_file(job / 'apt-hook', True) == hook and stat.S_IMODE((job / 'apt-hook').stat().st_mode) == 0o700,
+         'preconfiguration_APT_hook_changed')
+    receipt_path = BASE / ('preconfiguration-recovery-' + job.name + '.json')
+    need(not receipt_path.exists() and not receipt_path.is_symlink(), 'preconfiguration_already_attempted')
+    shared, held, paused, saved, journal = None, [], False, False, None
+    receipt = None
+    try:
+        shared = shared_lock()
+        held = package_locks()
+        initialize_version_comparison()
+        after = _configuration_after(plan)
+        timers = _preinstall_json(job / 'timers.json')
+        baseline = _preconfiguration_baseline(plan, after, timers, values, modes)
+        source = safe_file(__file__)
+        need(_preinstall_inventory(job) == original and safe_file(BASE / 'current.json', True) == raw_current,
+             'preconfiguration_evidence_changed')
+        receipt = dict(schema=1, phase='started', job=str(job), original_files=original,
+            original_event_bytes=len(events_raw), original_current_sha256=digest(raw_current),
+            new_source_sha256=digest(source), plan_sha256=digest(plan_raw), package_actions=0,
+            explicit_vendor_socket_adoption=True, before=baseline)
+        atomic(receipt_path, encoded(receipt))
+        atomic(job / 'preconfiguration-original-current.json', raw_current)
+        need(safe_file(job / 'preconfiguration-original-current.json', True) == raw_current,
+             'preconfiguration_original_current_backup_changed')
+        saved = True
+        atomic(job / 'preconfiguration-source.py', source)
+        paused = True
+        if timers:
+            command(['/bin/systemctl', 'stop'] + timers)
+        need(_preconfiguration_baseline(plan, after, [], values, modes) == baseline
+             and safe_file(BASE / 'current.json', True) == raw_current
+             and all(digest(safe_file(job / name, True)) == sha for name, sha in original.items()),
+             'preconfiguration_baseline_changed_after_admission')
+        journal = Journal(job)
+        journal.phase('preconfiguration_only_continuation', original_version='1.0.10', APT_replayed=False,
+                      explicit_vendor_socket_adoption=True)
+        finish_configuration(plan, job, journal, values, modes, after, prepared=False, adopt_vendor_socket=True, expected_socket_result=baseline['socket'], expected_target_files=baseline['target_files'])
+        if timers:
+            command(['/bin/systemctl', 'start'] + timers)
+        _preinstall_timers(timers)
+        paused = False
+        completion_names = ('preconfiguration-original-current.json', 'preconfiguration-source.py', 'target-default-www.conf',
+            'target-default-global.conf', 'vendor-socket-proof.json', 'runtime-before-cutover.json',
+            'runtime-after-cutover.json', 'verification.json', 'owned-Nginx-edits.json')
+        receipt['completion_files'] = {name: digest(safe_file(job / name, True)) for name in completion_names}
+        need(receipt['completion_files']['preconfiguration-original-current.json'] == digest(raw_current)
+             and receipt['completion_files']['preconfiguration-source.py'] == digest(source)
+             and receipt['completion_files']['target-default-www.conf'] == baseline['target_files']['/etc/php/8.5/fpm/pool.d/www.conf']['sha256']
+             and receipt['completion_files']['target-default-global.conf'] == baseline['target_files']['/etc/php/8.5/fpm/php-fpm.conf']['sha256']
+             and _preinstall_json(job / 'vendor-socket-proof.json') == baseline['socket']['proof'],
+             'preconfiguration_completion_evidence_changed')
+        for name, sha in original.items():
+            raw = safe_file(job / name, True)
+            if name == 'events.jsonl':
+                raw = raw[:len(events_raw)]
+            need(digest(raw) == sha, 'preconfiguration_original_evidence_changed_after_completion')
+        receipt['completion_event_sha256'] = _postconfig_events(job)[2]
+        receipt['phase'] = 'complete'
+        atomic(receipt_path, encoded(receipt))
+        return dict(phase='preconfiguration_complete', job=str(job), APT_replayed=False)
+    except BaseException as error:
+        if saved:
+            journal = journal or Journal(job)
+            journal.phase('preconfiguration_failed_needs_review', reason=str(error) if isinstance(error, Hold) else type(error).__name__,
+                          recovery=str(job / 'recovery.json'), preconfiguration_receipt=str(receipt_path),
+                          details=getattr(error, 'details', {}) if isinstance(error, Hold) else exception_details(error))
+        raise
+    finally:
+        try:
+            if paused:
+                if timers:
+                    command(['/bin/systemctl', 'start'] + timers)
+                _preinstall_timers(timers)
+        finally:
+            for fd in reversed(held):
+                os.close(fd)
+            if shared is not None:
+                os.close(shared)
+
+
+def finish_configuration(plan, job, journal, alternatives, alternative_modes, after, prepared=False, adopt_vendor_socket=False, expected_socket_result=None, expected_target_files=None):
     journal.phase('target_configuration')
     target_profiles = {}
     for sapi in ('cli', 'fpm'):
@@ -2787,6 +3077,9 @@ def finish_configuration(plan, job, journal, alternatives, alternative_modes, af
     need(compare(target['version'], FLOOR) >= 0, 'target_runtime_below_security_floor')
     socket_result = (verified_vendor_socket(plan, after) if adopt_vendor_socket and plan['mode'] == 'migration'
                      else dict(socket_overrides={}, proof=None))
+    need(expected_socket_result is None or socket_result == expected_socket_result, 'admitted_socket_proof_changed')
+    need(expected_target_files is None or files_snapshot(expected_target_files) == expected_target_files,
+         'admitted_target_configuration_changed')
     socket_overrides = socket_result['socket_overrides']
     if socket_result['proof'] is not None:
         atomic(job / 'vendor-socket-proof.json', encoded(socket_result['proof']))
@@ -2817,6 +3110,10 @@ def finish_configuration(plan, job, journal, alternatives, alternative_modes, af
                  not (target_dir / ('www.conf.distribution-' + job.name)).exists(), 'target_defaults_already_archived')
             default_www = safe_file(target_dir / 'www.conf')
             default_global = safe_file(global_path)
+            if expected_target_files is not None:
+                need(digest(default_www) == expected_target_files[str(target_dir / 'www.conf')]['sha256']
+                     and digest(default_global) == expected_target_files[str(global_path)]['sha256'],
+                     'admitted_target_defaults_changed_before_archive')
             atomic(job / 'target-default-www.conf', default_www)
             # Archive rather than delete the distribution's unused default pool.
             (target_dir / 'www.conf').rename(target_dir / ('www.conf.distribution-' + job.name))
@@ -2930,10 +3227,17 @@ def apply(adopt_vendor_socket=False):
         verify_preflight_archive_journals()
         verify_preinstall_recovery_journals()
         verify_postconfiguration_journals()
+        verify_preconfiguration_journals()
         if (BASE / 'current.json').exists():
             pending_current = _preinstall_json(BASE / 'current.json')
-            if pending_current.get('version') == '1.0.9' and pending_current.get('phase') != 'complete':
+            if (pending_current.get('version') == '1.0.9'
+                and pending_current.get('phase') == 'configuration_continuation_failed_needs_review'
+                and pending_current.get('reason') == 'forwarded_INI_effective_value_mismatch'):
                 print(json.dumps(continue_v109_configuration(pending_current, adopt_vendor_socket)), flush=True)
+                return
+            if (pending_current.get('version') == '1.0.10' and pending_current.get('phase') == 'failed_needs_review'
+                and pending_current.get('reason') == 'socket_adoption_database_package_unapproved'):
+                print(json.dumps(continue_v110_preconfiguration(pending_current, adopt_vendor_socket)), flush=True)
                 return
         verify_configuration_continuation_journals()
         if (BASE / 'current.json').exists():

@@ -101,7 +101,7 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.10 retains five narrowly defined automatic preflight recovery cases on the
+Version 1.0.11 retains five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
@@ -244,3 +244,26 @@ ownership must agree. The old pending receipt, failure pointer and INI bytes are
 preserved. Only those two INIs are rewritten before the normal configuration,
 runtime and HTTPS checks and cutover. APT is not replayed. An interrupted or
 changed continuation remains held; the flag does not authorize a general retry.
+
+Version 1.0.11 recognizes the exact Oracle package owner
+`mysql-community-server-core` for the existing canonical `mysqld` executable.
+All package-file, live process, socket inode/device, ownership and listener
+checks remain required. Similar package names are not accepted by this
+exception. The updater does not convert database vendors, change database
+majors or make a database connection for this proof.
+
+The exact byte-pinned v1.0.10 failure
+`socket_adoption_database_package_unapproved` has its own preconfiguration
+continuation. It requires the original eight-event chain, successful APT logs
+and accepted hook, unchanged sealed package plan and source/health baselines,
+restored timers, inactive target FPM, package-proven stock target configuration,
+and no migration INIs or archived target defaults from an earlier configuration
+attempt. The explicit socket option remains required. A new durable one-use
+receipt is written before configuration; the socket proof and target files are
+rechecked before any new configuration writes. It preserves the original job
+and failed current pointer, archives the original target defaults once, then
+uses the normal configuration/runtime/HTTPS cutover checks. The successful
+package transaction is retained and is not replayed. Changed evidence, partial
+continuation receipts and every other failed-job shape still require inspection.
+Unknown preserved jobs report only bounded saved version, phase and reason
+identifiers; private job contents are not printed as failure diagnostics.

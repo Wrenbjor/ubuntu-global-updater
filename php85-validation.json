@@ -1,20 +1,20 @@
 {
-  "PHP85_updater_version": "1.0.10",
+  "PHP85_updater_version": "1.0.11",
   "Python_3_10_grammar": true,
   "bash_syntax": true,
   "bootstrap_self_tests": "{\"status\": \"bootstrap-fixtures-pass\", \"modes\": 7, \"pipeline_modes\": 4, \"truncation_prefixes\": 106, \"version_metadata_from_core_literal\": true, \"vendor_socket_opt_in_forwarded_explicit_modes\": true, \"unsafe_environment_rejected\": true, \"minimal_core_environment\": true, \"invalid_option_rejected\": true, \"corrupt_payload_rejected\": true, \"real_core_executed\": false, \"package_actions\": 0, \"service_actions\": 0}",
   "errors": 0,
   "failures": 0,
   "files": {
-    "README-php85.md": "77b845f3bf22cdeca77252227eadfe2a474c4fb3fdc2e81e825db12a36f620db",
-    "build_php85_release.py": "8da82d64bbae1ebb37dffbe3646b4fa039404ccd2a7979b12c752d86ecbdaac7",
-    "php85-packaging-review.json": "707dceee3bbebb18decc9547faa40ef1f6aecc3c2f0766d18ac3700d6eb3e222",
-    "php85.sh": "7ba064a4217dd0a5f2a464875ae92457f3538cef6415c6de61ac84a607c815b6",
+    "README-php85.md": "0b328e2832ac0cfab08057b3299d22b953dc819915255356288bd8554ae15de9",
+    "build_php85_release.py": "a0cb432bda2558c0479d6aa5bd413dc8a84d7252ca1037e3298076830ba2a301",
+    "php85-packaging-review.json": "adbff69d76578878b7c9f5c865da49defb6687ff886d76b6330516d27ec57e26",
+    "php85.sh": "e2e596db99214391205e39630c5784c657fcb13752c316113da2679554357215",
     "php85_runtime.py": "29857391d1637630760351af38a8cffc2ebfd54174532dc5d0e31706fff8fd2c",
-    "php85_upgrade.py": "531a00fcd30186c16e1c7c6eb3fee7796ac3bdb0c482b504d1574d27da6d3992",
+    "php85_upgrade.py": "beeecf1e59f04dbe2742d78cb7f8902e0ba462033baa729c8fb22087b8996a35",
     "test_php85_runtime.py": "264fa380490edbb8eb290287d6264d0ee971f9d937d02e7e34849dbd6a053201",
     "test_php85_security.py": "a860fde1d140728fd9c5a180c078e8e62fb0cc34c378cba83bdad0c1f5ae332c",
-    "test_php85_upgrade.py": "36426e98e332df8bdcb335a760f40e304d552cb2e68633c6a917f13d69992039"
+    "test_php85_upgrade.py": "787fcb18831dba1051bdcc6b84b06af7f8ce6b8627b11ad909308c6bb1c93b49"
   },
   "live_migration_tested": false,
   "production_execution": false,
@@ -43,8 +43,8 @@
       "errors": 0,
       "failures": 0,
       "skips": 0,
-      "tests": 147
+      "tests": 160
     }
   },
-  "tests": 232
+  "tests": 245
 }
