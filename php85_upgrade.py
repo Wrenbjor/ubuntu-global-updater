@@ -20,7 +20,7 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.9'
+VERSION = '1.0.10'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
@@ -919,7 +919,7 @@ def executable_INI_guard(settings_files):
         need(final.get(key, '') == '', 'application_preload_prepend_or_basedir_requires_review')
 
 
-def ini_output(old, target, settings_files):
+def ini_output(old, target, settings_files, socket_override=None):
     executable_INI_guard(settings_files)
     target_keys = set(target['ini'])
     old_modules = {value.lower() for value in old['modules']}
@@ -931,13 +931,19 @@ def ini_output(old, target, settings_files):
             match = re.match(r'^\s*([A-Za-z0-9_.-]+)\s*=', line)
             if match:
                 explicit.add(match[1])
+    if socket_override is not None:
+        need(socket_override in ('/run/mysqld/mysqld.sock', '/var/run/mysqld/mysqld.sock')
+             and 'mysqli.default_socket' in explicit and 'mysqli.default_socket' in target_keys
+             and old['ini'].get('mysqli.default_socket', object()) is None
+             and {'mysqli', 'mysqlnd'} <= old_modules, 'unapproved_INI_socket_override')
     lines = ['; Preserved settings; PHP 8.5 owns its extension loaders.']
     for key in sorted(explicit):
         if key in SKIP_INI:
             continue
         if key not in old['ini']:
             continue
-        value = str(old['ini'][key]) if old['ini'][key] is not None else ''
+        value = (socket_override if key == 'mysqli.default_socket' and socket_override is not None
+                 else str(old['ini'][key]) if old['ini'][key] is not None else '')
         if key not in target_keys:
             # mysqli.reconnect defaulted to Off and was removed in PHP 8.2.
             # Normalize only this reviewed false value; never drop ON/unknown settings.
@@ -956,11 +962,12 @@ def ini_output(old, target, settings_files):
     return '\n'.join(lines) + '\n'
 
 
-def forwarded_values(old, target, settings_files):
-    ini_output(old, target, settings_files)
+def forwarded_values(old, target, settings_files, socket_override=None):
+    ini_output(old, target, settings_files, socket_override)
     keys = {m[1] for text in settings_files.values() for line in text.splitlines()
             if (m := re.match(r'^\s*([A-Za-z0-9_.-]+)\s*=', line))}
-    return {key: old['ini'][key] for key in keys - SKIP_INI if key in old['ini'] and key in target['ini']}
+    return {key: socket_override if key == 'mysqli.default_socket' and socket_override is not None else old['ini'][key]
+            for key in keys - SKIP_INI if key in old['ini'] and key in target['ini']}
 
 
 def global_FPM_output(text, branch):
@@ -1301,7 +1308,7 @@ def health(specs):
             url = urljoin(url, locations[0])
 
 
-def inspect():
+def inspect(adopt_vendor_socket=False):
     validate_apt_security()
     import apt
     import apt_pkg
@@ -1382,7 +1389,7 @@ def inspect():
     captured_text['/etc/php/' + branch + '/fpm/php-fpm.conf'] = global_config
     need(all(digest(text.encode()) == snapshot[path]['sha256'] for path, text in captured_text.items()),
          'configuration_changed_during_discovery')
-    plan = dict(schema=1, version=VERSION, code_sha256=digest(Path(__file__).read_bytes()), host=host,
+    plan = dict(schema=1, version=VERSION, adopt_vendor_socket=adopt_vendor_socket, code_sha256=digest(Path(__file__).read_bytes()), host=host,
         source_branch=branch, mode='patch' if branch == TARGET else 'migration', packages=before, sources=sources,
         files=snapshot, nginx=nginx, pools=texts, parsed_pools=parsed, socket_map=mapping,
         source_registry=source_registry, source_CLI_registry=cli, INI_files=profile_files, source_enabled=source_enabled,
@@ -2163,12 +2170,18 @@ def _configuration_partial(plan, job, after, timers, values, modes):
     return dict(runtime=runtime, selectors=selectors, target_files=files_snapshot(partial_paths))
 
 
-def verify_configuration_continuation_journals():
+def verify_configuration_continuation_journals(skip_job=None):
     for path in BASE.glob('configuration-continuation-*.json'):
         receipt = _preinstall_json(path)
-        need(receipt.get('schema') == 1 and receipt.get('phase') == 'complete',
-             'unfinished_configuration_continuation_preserved')
         job = Path(receipt.get('job', ''))
+        if not (receipt.get('schema') == 1 and receipt.get('phase') == 'complete'):
+            admissible = (receipt.get('schema') == 1 and receipt.get('phase') == 'started'
+                          and job.parent == BASE and re.fullmatch(r'job-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', job.name))
+            if admissible and ((skip_job is not None and job == skip_job) or postconfiguration_supersedes(job)):
+                _preinstall_job(job)
+                need(path.name == 'configuration-continuation-' + job.name + '.json', 'invalid_configuration_continuation_receipt')
+                continue
+            raise Hold('unfinished_configuration_continuation_preserved')
         _preinstall_job(job)
         need(path.name == 'configuration-continuation-' + job.name + '.json', 'invalid_configuration_continuation_receipt')
         for name, sha in receipt['original_files'].items():
@@ -2182,7 +2195,7 @@ def verify_configuration_continuation_journals():
              'configuration_continuation_source_changed')
 
 
-def continue_v106_configuration(previous):
+def continue_v106_configuration(previous, adopt_vendor_socket=False):
     need(set(previous) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'details', 'recovery'}
          and previous['version'] == '1.0.6' and previous['phase'] == 'failed_needs_review'
          and previous['reason'] == 'removed_nondefault_INI_setting' and previous['details'] == {},
@@ -2285,7 +2298,7 @@ def continue_v106_configuration(previous):
              'configuration_continuation_original_evidence_changed_after_admission')
         journal = Journal(job)
         journal.phase('configuration_only_continuation', original_version='1.0.6', plan_sha256=digest(plan_raw), APT_replayed=False)
-        finish_configuration(plan, job, journal, values, modes, after, prepared=True)
+        finish_configuration(plan, job, journal, values, modes, after, prepared=True, adopt_vendor_socket=adopt_vendor_socket)
         if timers:
             command(['/bin/systemctl', 'start'] + timers)
         _preinstall_timers(timers)
@@ -2315,7 +2328,451 @@ def continue_v106_configuration(previous):
                 os.close(shared)
 
 
-def finish_configuration(plan, job, journal, alternatives, alternative_modes, after, prepared=False):
+def _ss_vfs_device(device):
+    """ss applies libc major/minor to the UNIX_DIAG_VFS raw kernel 12:20 dev_t."""
+    need(type(device) is int and device >= 0, 'socket_adoption_invalid_filesystem_device')
+    major, minor = os.major(device), os.minor(device)
+    need(major <= 0xfff and minor <= 0xfffff, 'socket_adoption_filesystem_device_out_of_range')
+    kernel_device = (major << 20) | minor
+    return os.major(kernel_device), os.minor(kernel_device)
+
+
+def verified_vendor_socket(plan, after):
+    """Explicit opt-in adoption of one standard live local MySQL socket; no DB connection."""
+    eligible = {}
+    for sapi, field in (('fpm', 'source_registry'), ('cli', 'source_CLI_registry')):
+        old = plan[field]
+        explicit = any(re.search(r'(?m)^\s*mysqli\.default_socket\s*=', text)
+                       for text in plan['INI_files'][sapi].values())
+        if explicit and old['ini'].get('mysqli.default_socket', object()) is None:
+            need({'mysqli', 'mysqlnd'} <= {m.lower() for m in old['modules']}, 'socket_adoption_requires_mysqlnd')
+            eligible[sapi] = field
+    if not eligible:
+        return dict(socket_overrides={}, proof=None)
+    installed_vendor_file('php8.5-cli', '/usr/bin/php8.5')
+    need('php8.5-mysql' in after, 'socket_adoption_mysql_package_missing')
+    current = {sapi: registry(TARGET, sapi == 'fpm') for sapi in eligible}
+    directories = {row['directory'] for row in current.values()}
+    need(len(directories) == 1, 'socket_adoption_API_ambiguous')
+    directory = next(iter(directories))
+    need(re.fullmatch(r'/usr/lib/php/[0-9]{8}', directory), 'socket_adoption_API_nonstandard')
+    paths = [directory + '/' + name + '.so' for name in ('mysqlnd', 'mysqli')]
+    for path in paths:
+        installed_vendor_file('php8.5-mysql', path)
+    script = "echo json_encode(['version'=>PHP_VERSION,'modules'=>get_loaded_extensions(),'socket'=>ini_get_all(null,false)['mysqli.default_socket']??null]);"
+    compiled = json.loads(command(['/usr/bin/php8.5', '-n', '-d', 'extension=' + paths[0],
+                                  '-d', 'extension=' + paths[1], '-r', script]))
+    need(compiled['version'].startswith('8.5.') and {'mysqli', 'mysqlnd'} <=
+         {m.lower() for m in compiled['modules']}, 'socket_adoption_compiled_registry_invalid')
+    profiles = {}
+    for sapi in eligible:
+        files = ['/etc/php/8.5/' + sapi + '/php.ini'] + sorted(glob.glob('/etc/php/8.5/' + sapi + '/conf.d/*.ini'))
+        profiles[sapi] = {p: safe_file(p).decode() for p in files
+                         if p != '/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini'}
+    _configuration_vendor_profiles(profiles, after)
+    choices = {}
+    for sapi, files in profiles.items():
+        value = compiled['socket']
+        for text in files.values():
+            executable_INI_guard({'vendor.ini': text})
+            for line in text.splitlines():
+                match = re.match(r'^\s*mysqli\.default_socket\s*=\s*(.*?)\s*(?:;.*)?$', line)
+                if match:
+                    literal = match[1].strip().strip('"\'')
+                    # PHP's OnUpdateStringUnempty rejects an empty assignment.
+                    if literal:
+                        need(literal in ('/run/mysqld/mysqld.sock', '/var/run/mysqld/mysqld.sock'),
+                             'socket_adoption_vendor_default_nonstandard')
+                        value = literal
+        need(value in ('/run/mysqld/mysqld.sock', '/var/run/mysqld/mysqld.sock')
+             and current[sapi]['ini'].get('mysqli.default_socket') == value,
+             'socket_adoption_default_not_vendor_proven')
+        choices[sapi] = value
+    need(len(set(choices.values())) == 1, 'socket_adoption_SAPI_defaults_differ')
+    chosen = next(iter(choices.values()))
+    canonical = Path('/run/mysqld/mysqld.sock')
+    aliases = [Path('/run/mysqld/mysqld.sock'), Path('/var/run/mysqld/mysqld.sock')]
+    def socket_rows():
+        result = []
+        for path in aliases:
+            info = path.stat()
+            need(path.resolve(strict=True) == canonical and stat.S_ISSOCK(info.st_mode),
+                 'socket_adoption_endpoint_not_canonical_socket')
+            result.append(dict(path=str(path), device=info.st_dev, inode=info.st_ino,
+                               uid=info.st_uid, gid=info.st_gid, mode=stat.S_IMODE(info.st_mode)))
+        need(all(row['device'] == result[0]['device'] and row['inode'] == result[0]['inode']
+                 for row in result), 'socket_adoption_alias_endpoint_mismatch')
+        need(not canonical.is_symlink(), 'socket_adoption_leaf_alias_requires_review')
+        return result
+    sockets = socket_rows()
+    for path in ('/', '/var', '/run', '/run/mysqld'):
+        info = Path(path).lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, sockets[0]['uid'])
+             and not info.st_mode & 0o022, 'socket_adoption_unsafe_endpoint_parent')
+    varrun = Path('/var/run').lstat()
+    need(stat.S_ISLNK(varrun.st_mode) and varrun.st_uid == 0
+         and Path('/var/run').resolve(strict=True) == Path('/run'), 'socket_adoption_run_alias_changed')
+    listeners = []
+    for line in command(['/usr/bin/ss', '-H', '-lxnpe']).splitlines():
+        fields = line.split()
+        if len(fields) >= 9 and fields[0:2] == ['u_str', 'LISTEN'] and fields[4] in {str(path) for path in aliases}:
+            suffix = ' '.join(fields[8:])
+            owners = re.findall(r'users:\(\("(mysqld|mariadbd)",pid=([0-9]+),fd=([0-9]+)\)\)', suffix)
+            vfs = re.findall(r'\bino:([0-9]+)\s+dev:([0-9]+)/([0-9]+)\b', suffix)
+            need(len(owners) == 1 and len(vfs) == 1 and fields[5].isdigit(), 'socket_adoption_listener_owner_ambiguous')
+            owner, node = owners[0], tuple(map(int, vfs[0]))
+            need(node == (sockets[0]['inode'], *_ss_vfs_device(sockets[0]['device'])),
+                 'socket_adoption_listener_filesystem_inode_mismatch')
+            listeners.append(dict(name=owner[0], pid=int(owner[1]), fd=int(owner[2]), kernel_inode=int(fields[5]),
+                                  filesystem_inode=node[0], device_major=node[1], device_minor=node[2]))
+    need(len(listeners) == 1, 'socket_adoption_listener_ambiguous_or_absent')
+    listener = listeners[0]
+    process = Path('/proc/' + str(listener['pid']))
+    before = RUNTIME['proc_stat']('/proc', listener['pid'])
+    need(before[2] not in ('Z', 'X'), 'socket_adoption_database_not_live')
+    executable = Path('/usr/sbin/' + listener['name']).resolve(strict=True)
+    need(str(executable) in ('/usr/sbin/mysqld', '/usr/sbin/mariadbd')
+         and os.readlink(process / 'exe') == str(executable), 'socket_adoption_noncanonical_database_executable')
+    owners = command(['/usr/bin/dpkg-query', '-S', str(executable)]).splitlines()
+    need(len(owners) == 1 and ': ' in owners[0], 'socket_adoption_database_package_ambiguous')
+    owner = owners[0].split(': ', 1)[0].split(':', 1)[0]
+    need(owner in after and owner.startswith(('mysql-server-core', 'mariadb-server-core')),
+         'socket_adoption_database_package_unapproved')
+    installed_vendor_file(owner, str(executable))
+    disk, live = executable.stat(), (process / 'exe').stat()
+    need((disk.st_dev, disk.st_ino) == (live.st_dev, live.st_ino), 'socket_adoption_database_executable_stale')
+    status = RUNTIME['bounded'](process / 'status', 65536).decode()
+    uid = re.findall(r'^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s*$', status, re.M)
+    need(len(uid) == 1 and all(int(value) == sockets[0]['uid'] for value in uid[0]),
+         'socket_adoption_database_socket_owner_mismatch')
+    need(os.readlink(process / 'fd' / str(listener['fd'])) == 'socket:[' + str(listener['kernel_inode']) + ']',
+         'socket_adoption_listener_fd_changed')
+    final = RUNTIME['proc_stat']('/proc', listener['pid'])
+    need(final[:2] == before[:2] and final[2] not in ('Z', 'X') and socket_rows() == sockets
+         and os.readlink(process / 'exe') == str(executable), 'socket_adoption_endpoint_changed')
+    return dict(socket_overrides=choices, proof=dict(explicit_adoption=True, source_value=None,
+                chosen_socket=chosen, compiled_default=compiled['socket'], PHP_version=compiled['version'],
+                filesystem_sockets=sockets, listener=listener, database_package=owner,
+                process_start_ticks=before[1], customer_database_connection_attempted=False))
+
+
+POSTCONFIG_V109_SHA256 = 'b09929b996936f1b9e72e3222bc1f9300a1a11bab905bc82fe5d8c923b003ca6'
+
+
+def _postconfig_events(job):
+    raw = safe_file(job / 'events.jsonl', True)
+    rows, last = [], '0' * 64
+    for line in raw.splitlines(keepends=True):
+        row = json.loads(line, object_pairs_hook=_preinstall_object)
+        need(row.get('previous_sha256') == last
+             and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', row.get('time', '')),
+             'postconfiguration_event_chain_changed')
+        rows.append(row)
+        last = digest(line)
+    return raw, rows, last
+
+
+def _postconfig_old_evidence(job, pending, plan):
+    need(pending.get('schema') == 1 and pending.get('phase') == 'started' and pending.get('job') == str(job)
+         and pending.get('original_source_sha256') == CONTINUATION_V106_SHA256
+         and pending.get('continuation_source_sha256') == POSTCONFIG_V109_SHA256
+         and pending.get('plan_sha256') == digest(encoded(plan))
+         and pending.get('prior_APT_succeeded') is True and pending.get('replay_APT') is False,
+         'postconfiguration_unrecognized_pending_receipt')
+    original = pending['original_files']
+    expected = {'php85_upgrade.py', 'events.jsonl', 'timers.json', 'plan.json', 'plan.sha256', 'recovery.json',
+                'alternatives.json', 'alternative-modes.json', 'apt-hook', 'hook-accepted.json',
+                'apt-install.stdout', 'apt-install.stderr', 'target-default-www.conf', 'target-default-global.conf'}
+    expected.update('configuration-' + str(i) for i in range(len(plan['files'])))
+    need(set(original) == expected, 'postconfiguration_original_artifact_inventory_changed')
+    need(original['php85_upgrade.py'] == CONTINUATION_V106_SHA256,
+         'postconfiguration_original_source_changed')
+    for name, sha in original.items():
+        raw = safe_file(job / name, True)
+        if name == 'events.jsonl':
+            raw = raw[:pending['original_event_bytes']]
+        need(digest(raw) == sha, 'postconfiguration_original_evidence_changed')
+    need(digest(safe_file(job / 'configuration-continuation-source.py', True)) == POSTCONFIG_V109_SHA256
+         and digest(safe_file(job / 'configuration-continuation-original-current.json', True)) == pending['original_current_sha256'],
+         'postconfiguration_original_continuation_changed')
+
+
+def _postconfig_legacy_renderer(job):
+    need(digest(safe_file(job / 'configuration-continuation-source.py', True)) == POSTCONFIG_V109_SHA256,
+         'postconfiguration_old_renderer_source_changed')
+    # Default rendering deliberately retains v109 bytes; only explicit override differs.
+    return ini_output
+
+
+def _postconfig_baseline(plan, job, pending, after, timers, values, modes, renderer):
+    need(identity() == plan['host'] and source_files() == plan['sources']
+         and files_snapshot(plan['files']) == plan['files'], 'postconfiguration_original_baseline_changed')
+    need(_configuration_after(plan) == after, 'postconfiguration_package_table_changed')
+    branch = plan['source_branch']
+    need(Path('/usr/bin/php').resolve() == Path('/usr/bin/php' + branch).resolve(), 'postconfiguration_default_CLI_changed')
+    validate_loaders(branch, plan['INI_files'], after)
+    need(registry(branch) == plan['source_CLI_registry'] and registry(branch, True) == plan['source_registry'],
+         'postconfiguration_source_registry_changed')
+    unit = validate_native_unit(branch, True)
+    need(unit in plan['files'] and unit_enabled(branch) is plan['source_enabled'], 'postconfiguration_source_unit_changed')
+    need(not Path('/usr/sbin/policy-rc.d').exists() and not Path('/usr/sbin/policy-rc.d').is_symlink(),
+         'postconfiguration_policy_present')
+    _preinstall_runtime(branch)
+    _configuration_selectors(values, modes)
+    _preinstall_timers(timers)
+    validate_native_unit(TARGET)
+    need(command(['/bin/systemctl', 'show', 'php8.5-fpm.service', '-p', 'ActiveState', '--value']).strip() == 'inactive'
+         and command(['/bin/systemctl', 'show', 'php8.5-fpm.service', '-p', 'MainPID', '--value']).strip() == '0',
+         'postconfiguration_target_not_inactive')
+    before = pending['before']['target_files']
+    need(files_snapshot(before) == before, 'postconfiguration_preexisting_target_files_changed')
+    profiles, ini_rows = {}, {}
+    for sapi, old in (('fpm', plan['source_registry']), ('cli', plan['source_CLI_registry'])):
+        migration = '/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini'
+        expected_paths = {p for p in before if p.startswith('/etc/php/8.5/' + sapi + '/conf.d/')}
+        need(set(glob.glob('/etc/php/8.5/' + sapi + '/conf.d/*.ini')) == expected_paths | {migration},
+             'postconfiguration_extra_target_INI')
+        profiles[sapi] = {p: safe_file(p).decode() for p in sorted(expected_paths)}
+        main = '/etc/php/8.5/' + sapi + '/php.ini'
+        profiles[sapi][main] = safe_file(main).decode()
+        row = files_snapshot([migration])[migration]
+        mode, gid = merged_mode([plan['files'][p] for p in plan['INI_files'][sapi]])
+        need(row['link'] is None and row['mode'] == mode and row['uid'] == 0 and row['gid'] == gid,
+             'postconfiguration_owned_INI_metadata_changed')
+        ini_rows[migration] = row
+    _configuration_vendor_profiles(profiles, after)
+    complete_profiles = {sapi: dict(settings) for sapi, settings in profiles.items()}
+    for sapi in ('fpm', 'cli'):
+        path = '/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini'
+        complete_profiles[sapi][path] = safe_file(path).decode()
+        executable_INI_guard(complete_profiles[sapi])
+    validate_loaders(TARGET, complete_profiles, after)
+    for sapi, old in (('fpm', plan['source_registry']), ('cli', plan['source_CLI_registry'])):
+        target = registry(TARGET, sapi == 'fpm')
+        path = '/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini'
+        need(safe_file(path) == renderer(old, target, plan['INI_files'][sapi]).encode(),
+             'postconfiguration_owned_INI_bytes_changed')
+        expected = forwarded_values(old, target, plan['INI_files'][sapi])
+        mismatches = {key for key, value in expected.items() if target['ini'].get(key) != value}
+        need(mismatches == {'mysqli.default_socket'} and old['ini']['mysqli.default_socket'] is None,
+             'postconfiguration_effective_drift_outside_reviewed_socket')
+    directory = Path('/etc/php/8.5/fpm/pool.d')
+    pools = pool_outputs(plan['pools'], plan['parsed_pools'], plan['socket_map'])
+    need({p.name for p in directory.iterdir()} == set(pools) | {'www.conf.distribution-' + job.name},
+         'postconfiguration_extra_pool')
+    health(plan['nginx']['health'])
+    return ini_rows
+
+
+def verify_postconfiguration_journals():
+    for path in BASE.glob('postconfiguration-*.json'):
+        receipt = _preinstall_json(path)
+        need(receipt.get('schema') == 1 and receipt.get('phase') == 'complete', 'unfinished_postconfiguration_preserved')
+        job = Path(receipt.get('job', ''))
+        _preinstall_job(job)
+        need(path == BASE / ('postconfiguration-' + job.name + '.json'), 'invalid_postconfiguration_receipt')
+        pending_path = BASE / ('configuration-continuation-' + job.name + '.json')
+        need(digest(safe_file(pending_path, True)) == receipt['pending_receipt_sha256'], 'postconfiguration_pending_receipt_changed')
+        plan = _preinstall_json(job / 'plan.json')
+        pending = _preinstall_json(pending_path)
+        _postconfig_old_evidence(job, pending, plan)
+        need(set(receipt['preserved_files']) == set(pending['original_files']) |
+             {'configuration-continuation-source.py', 'configuration-continuation-original-current.json'},
+             'postconfiguration_preserved_inventory_changed')
+        for name, sha in receipt['preserved_files'].items():
+            raw = safe_file(job / name, True)
+            if name == 'events.jsonl':
+                raw = raw[:receipt['original_event_bytes']]
+            need(digest(raw) == sha, 'postconfiguration_preserved_evidence_changed')
+        completion_names = {'postconfiguration-original-current.json', 'postconfiguration-source.py',
+            'postconfiguration-original-fpm.ini', 'postconfiguration-original-cli.ini',
+            'runtime-before-cutover.json', 'runtime-after-cutover.json', 'verification.json', 'owned-Nginx-edits.json'}
+        need(set(receipt['completion_files']) == completion_names
+             and receipt['completion_files']['postconfiguration-original-current.json'] == receipt['original_current_sha256']
+             and receipt['completion_files']['postconfiguration-source.py'] == receipt['new_source_sha256'],
+             'postconfiguration_completion_inventory_changed')
+        for sapi in ('fpm', 'cli'):
+            path_ini = '/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini'
+            need(receipt['completion_files']['postconfiguration-original-' + sapi + '.ini'] == receipt['owned_ini_before'][path_ini]['sha256'],
+                 'postconfiguration_old_INI_backup_changed')
+        for name, sha in receipt['completion_files'].items():
+            need(digest(safe_file(job / name, True)) == sha, 'postconfiguration_completion_proof_changed')
+        events_raw, rows, last = _postconfig_events(job)
+        need(rows[-1]['phase'] == 'complete' and last == receipt['completion_event_sha256'],
+             'postconfiguration_final_journal_changed')
+        need([row['phase'] for row in rows[11:]] == ['postconfiguration_only_continuation', 'Nginx_cutover', 'web_verification', 'complete']
+             and rows[11].get('explicit_vendor_socket_adoption') is True
+             and rows[11].get('APT_replayed') is False, 'postconfiguration_completion_stages_changed')
+        verification = _preinstall_json(job / 'verification.json')
+        need(verification.get('web_smoke_checks') is True and verification.get('application_compatibility_claim') is False
+             and verification.get('Nginx_sockets') == sorted(plan['socket_map'].values())
+             and verification.get('adopted_vendor_socket') ==
+                 {sapi: receipt['socket_proof']['chosen_socket'] for sapi in ('fpm', 'cli')},
+             'postconfiguration_final_verification_changed')
+        for name in ('runtime-before-cutover.json', 'runtime-after-cutover.json'):
+            need(isinstance(_preinstall_json(job / name), dict) and _preinstall_json(job / name),
+                 'postconfiguration_runtime_proof_missing')
+
+
+def postconfiguration_supersedes(job):
+    """Only a fully verified complete successor may supersede one old pending receipt."""
+    verify_postconfiguration_journals()
+    path = BASE / ('postconfiguration-' + job.name + '.json')
+    return path.exists() and _preinstall_json(path).get('phase') == 'complete'
+
+
+def continue_v109_configuration(previous, adopt_vendor_socket=False):
+    need(adopt_vendor_socket is True, 'explicit_adopt_vendor_socket_required')
+    need(set(previous) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'details', 'recovery', 'continuation_receipt'}
+         and previous['version'] == '1.0.9' and previous['phase'] == 'configuration_continuation_failed_needs_review'
+         and previous['reason'] == 'forwarded_INI_effective_value_mismatch' and previous['details'] == {},
+         'postconfiguration_unrecognized_failure')
+    job = Path(previous['job'])
+    _preinstall_job(job)
+    pending_path = BASE / ('configuration-continuation-' + job.name + '.json')
+    need(previous['recovery'] == str(job / 'recovery.json') and previous['continuation_receipt'] == str(pending_path),
+         'postconfiguration_failure_pointer_changed')
+    verify_preflight_archive_journals()
+    verify_preinstall_recovery_journals()
+    verify_postconfiguration_journals()
+    # Root wires this optional skip only for this exact pending admission.
+    verify_configuration_continuation_journals(skip_job=job)
+    raw_current = safe_file(BASE / 'current.json', True)
+    need(_preinstall_json(BASE / 'current.json') == previous, 'postconfiguration_current_changed')
+    plan_raw, plan = safe_file(job / 'plan.json', True), _preinstall_json(job / 'plan.json')
+    need(plan_raw == encoded(plan) and safe_file(job / 'plan.sha256', True).decode() == digest(plan_raw) + '\n'
+         and plan.get('version') == '1.0.6' and plan.get('schema') == 1
+         and plan.get('code_sha256') == CONTINUATION_V106_SHA256 and plan.get('source_branch') == '7.4'
+         and plan.get('mode') == 'migration', 'postconfiguration_plan_changed')
+    pending_raw, pending = safe_file(pending_path, True), _preinstall_json(pending_path)
+    _postconfig_old_evidence(job, pending, plan)
+    events_raw, rows, last = _postconfig_events(job)
+    need(len(rows) == 11 and [r['phase'] for r in rows[-3:]] == ['configuration_only_continuation', 'target_configuration',
+         'configuration_continuation_failed_needs_review'] and last == previous['event_sha256']
+         and rows[-3].get('original_version') == '1.0.6' and rows[-3].get('plan_sha256') == digest(plan_raw)
+         and rows[-3].get('APT_replayed') is False
+         and all(rows[-1].get(k) == previous[k] for k in ('reason', 'details', 'recovery', 'continuation_receipt')),
+         'postconfiguration_unrecognized_event_suffix')
+    common = {'time', 'phase', 'previous_sha256'}
+    need(set(rows[8]) == common | {'original_version', 'plan_sha256', 'APT_replayed'}
+         and set(rows[9]) == common
+         and set(rows[10]) == common | {'reason', 'details', 'recovery', 'continuation_receipt'},
+         'postconfiguration_event_suffix_fields_changed')
+    need(all(set(rows[i]) == common for i in (0, 1, 3, 4, 6))
+         and set(rows[2]) == common | {'source', 'target', 'changed_packages', 'plan_sha256'}
+         and rows[2]['source'] == '7.4' and rows[2]['target'] == TARGET
+         and rows[2]['changed_packages'] == sorted(plan['changes']) and rows[2]['plan_sha256'] == digest(plan_raw)
+         and set(rows[5]) == common | {'exit_code', 'logs'}
+         and set(rows[7]) == common | {'reason', 'details', 'recovery'}
+         and rows[7]['details'] == {} and rows[7]['recovery'] == str(job / 'recovery.json')
+         and pending['original_event_bytes'] == len(b''.join(events_raw.splitlines(keepends=True)[:8])),
+         'postconfiguration_original_event_fields_changed')
+    original_current = _preinstall_json(job / 'configuration-continuation-original-current.json')
+    need(set(original_current) == {'version', 'job', 'phase', 'event_sha256', 'reason', 'details', 'recovery'}
+         and original_current['version'] == '1.0.6' and original_current['job'] == str(job)
+         and original_current['phase'] == 'failed_needs_review'
+         and original_current['reason'] == 'removed_nondefault_INI_setting' and original_current['details'] == {}
+         and original_current['recovery'] == str(job / 'recovery.json')
+         and digest(events_raw[:pending['original_event_bytes']].splitlines(keepends=True)[-1]) == original_current['event_sha256']
+         and [r['phase'] for r in rows[:8]] == ['preflight', 'refreshing_indexes', 'plan_sealed', 'downloading_packages',
+            'installing_packages', 'APT_install_exited', 'target_configuration', 'failed_needs_review']
+         and rows[5].get('exit_code') == 0 and rows[7].get('reason') == 'removed_nondefault_INI_setting',
+         'postconfiguration_original_failure_changed')
+    logs = [dict(path=str(job / name), sha256=digest(safe_file(job / name, True)),
+                 bytes=len(safe_file(job / name, True))) for name in ('apt-install.stdout', 'apt-install.stderr')]
+    need(rows[5].get('logs') == logs and _preinstall_json(job / 'hook-accepted.json') ==
+         dict(accepted=True, plan_sha256=digest(plan_raw)), 'postconfiguration_APT_proof_changed')
+    expected_names = set(pending['original_files']) | {'configuration-continuation-source.py', 'configuration-continuation-original-current.json'}
+    need({p.name for p in job.iterdir()} == expected_names, 'postconfiguration_extra_job_artifacts')
+    preserved = _preinstall_inventory(job)
+    receipt_path = BASE / ('postconfiguration-' + job.name + '.json')
+    need(not receipt_path.exists() and not receipt_path.is_symlink(), 'postconfiguration_already_attempted')
+    shared, held, paused, saved, journal = None, [], False, False, None
+    receipt = None
+    try:
+        shared = shared_lock()
+        held = package_locks()
+        initialize_version_comparison()
+        after = _configuration_after(plan)
+        timers = _preinstall_json(job / 'timers.json')
+        values, modes = _preinstall_json(job / 'alternatives.json'), _preinstall_json(job / 'alternative-modes.json')
+        renderer = _postconfig_legacy_renderer(job)
+        ini_rows = _postconfig_baseline(plan, job, pending, after, timers, values, modes, renderer)
+        socket_result = verified_vendor_socket(plan, after)
+        socket_proof, overrides = socket_result['proof'], socket_result['socket_overrides']
+        need(set(overrides) == {'fpm', 'cli'} and socket_proof.get('explicit_adoption') is True,
+             'postconfiguration_socket_adoption_not_applicable')
+        rendered = {}
+        for sapi, old in (('fpm', plan['source_registry']), ('cli', plan['source_CLI_registry'])):
+            rendered[sapi] = ini_output(old, registry(TARGET, sapi == 'fpm'), plan['INI_files'][sapi],
+                                       socket_override=overrides[sapi]).encode()
+        new_source = safe_file(__file__)
+        receipt = dict(schema=1, phase='started', job=str(job), pending_receipt_sha256=digest(pending_raw),
+            preserved_files=preserved, original_event_bytes=len(events_raw), original_current_sha256=digest(raw_current),
+            new_source_sha256=digest(new_source), plan_sha256=digest(plan_raw), package_actions=0,
+            explicit_vendor_socket_adoption=True, socket_proof=socket_proof, owned_ini_before=ini_rows)
+        need(_preinstall_inventory(job) == preserved and safe_file(BASE / 'current.json', True) == raw_current
+             and safe_file(pending_path, True) == pending_raw, 'postconfiguration_evidence_changed')
+        atomic(receipt_path, encoded(receipt))
+        atomic(job / 'postconfiguration-original-current.json', raw_current)
+        need(safe_file(job / 'postconfiguration-original-current.json', True) == raw_current, 'postconfiguration_current_backup_changed')
+        saved = True
+        atomic(job / 'postconfiguration-source.py', new_source)
+        for sapi in ('fpm', 'cli'):
+            path = '/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini'
+            atomic(job / ('postconfiguration-original-' + sapi + '.ini'), safe_file(path))
+            need(digest(safe_file(job / ('postconfiguration-original-' + sapi + '.ini'), True)) == ini_rows[path]['sha256'],
+                 'postconfiguration_old_INI_backup_changed')
+        paused = True
+        if timers:
+            command(['/bin/systemctl', 'stop'] + timers)
+        need(_postconfig_baseline(plan, job, pending, after, [], values, modes, renderer) == ini_rows
+             and verified_vendor_socket(plan, after) == socket_result
+             and safe_file(BASE / 'current.json', True) == raw_current and safe_file(pending_path, True) == pending_raw
+             and all(digest(safe_file(job / name, True)) == sha for name, sha in preserved.items()),
+             'postconfiguration_baseline_changed_after_admission')
+        journal = Journal(job)
+        journal.phase('postconfiguration_only_continuation', original_version='1.0.9', APT_replayed=False,
+                      explicit_vendor_socket_adoption=True)
+        for sapi, old in (('fpm', plan['source_registry']), ('cli', plan['source_CLI_registry'])):
+            path = Path('/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini')
+            row = ini_rows[str(path)]
+            atomic(path, rendered[sapi], row['mode'])
+            os.chown(path, row['uid'], row['gid'])
+        finalize_configured(plan, job, journal, values, modes, after, socket_overrides=overrides)
+        if timers:
+            command(['/bin/systemctl', 'start'] + timers)
+        _preinstall_timers(timers)
+        paused = False
+        receipt['completion_files'] = {name: digest(safe_file(job / name, True)) for name in (
+            'postconfiguration-original-current.json', 'postconfiguration-source.py',
+            'postconfiguration-original-fpm.ini', 'postconfiguration-original-cli.ini',
+            'runtime-before-cutover.json', 'runtime-after-cutover.json', 'verification.json', 'owned-Nginx-edits.json')}
+        receipt['completion_event_sha256'] = _postconfig_events(job)[2]
+        receipt['phase'] = 'complete'
+        atomic(receipt_path, encoded(receipt))
+        return dict(phase='postconfiguration_complete', job=str(job), APT_replayed=False)
+    except BaseException as error:
+        if saved:
+            journal = journal or Journal(job)
+            journal.phase('postconfiguration_failed_needs_review', reason=str(error) if isinstance(error, Hold) else type(error).__name__,
+                          recovery=str(job / 'recovery.json'), postconfiguration_receipt=str(receipt_path),
+                          details=getattr(error, 'details', {}) if isinstance(error, Hold) else exception_details(error))
+        raise
+    finally:
+        try:
+            if paused:
+                if timers:
+                    command(['/bin/systemctl', 'start'] + timers)
+                _preinstall_timers(timers)
+        finally:
+            for fd in reversed(held):
+                os.close(fd)
+            if shared is not None:
+                os.close(shared)
+
+
+def finish_configuration(plan, job, journal, alternatives, alternative_modes, after, prepared=False, adopt_vendor_socket=False):
     journal.phase('target_configuration')
     target_profiles = {}
     for sapi in ('cli', 'fpm'):
@@ -2328,6 +2785,11 @@ def finish_configuration(plan, job, journal, alternatives, alternative_modes, af
     target = registry(TARGET, True)
     target_cli = registry(TARGET, False)
     need(compare(target['version'], FLOOR) >= 0, 'target_runtime_below_security_floor')
+    socket_result = (verified_vendor_socket(plan, after) if adopt_vendor_socket and plan['mode'] == 'migration'
+                     else dict(socket_overrides={}, proof=None))
+    socket_overrides = socket_result['socket_overrides']
+    if socket_result['proof'] is not None:
+        atomic(job / 'vendor-socket-proof.json', encoded(socket_result['proof']))
     if plan['mode'] == 'migration':
         need(files_snapshot(plan['files']) == plan['files'], 'source_configuration_changed')
         rendered_pools = pool_outputs(plan['pools'], plan['parsed_pools'], plan['socket_map'])
@@ -2335,7 +2797,7 @@ def finish_configuration(plan, job, journal, alternatives, alternative_modes, af
         for sapi, old_registry, target_registry in (
             ('fpm', plan['source_registry'], target), ('cli', plan['source_CLI_registry'], target_cli)):
             settings = plan['INI_files'][sapi]
-            rendered_ini[sapi] = ini_output(old_registry, target_registry, settings).encode()
+            rendered_ini[sapi] = ini_output(old_registry, target_registry, settings, socket_overrides.get(sapi)).encode()
             ini_metadata[sapi] = merged_mode([plan['files'][path] for path in settings])
         for text in plan['pools'].values():
             for key in re.findall(r'(?m)^\s*php_(?:admin_)?(?:value|flag)\[([^\]]+)\]\s*=', text):
@@ -2374,11 +2836,24 @@ def finish_configuration(plan, job, journal, alternatives, alternative_modes, af
             path = Path('/etc/php/8.5/' + sapi + '/conf.d/99-ubuntu-php85-migration.ini')
             atomic(path, rendered_ini[sapi], mode)
             os.chown(path, 0, gid)
+    finalize_configured(plan, job, journal, alternatives, alternative_modes, after, socket_overrides)
+
+
+def finalize_configured(plan, job, journal, alternatives, alternative_modes, after, socket_overrides=None):
+    socket_overrides = socket_overrides or {}
+    target, target_cli = registry(TARGET, True), registry(TARGET, False)
+    need(compare(target['version'], FLOOR) >= 0, 'target_runtime_below_security_floor')
+    need(files_snapshot(plan['files']) == plan['files'], 'source_configuration_changed')
+    if plan['mode'] == 'migration':
         for sapi, old_registry, target_registry in (
             ('fpm', plan['source_registry'], target), ('cli', plan['source_CLI_registry'], target_cli)):
             current = registry(TARGET, sapi == 'fpm')
-            expected = forwarded_values(old_registry, target_registry, plan['INI_files'][sapi])
-            need(all(current['ini'].get(key) == value for key, value in expected.items()), 'forwarded_INI_effective_value_mismatch')
+            expected = forwarded_values(old_registry, target_registry, plan['INI_files'][sapi], socket_overrides.get(sapi))
+            mismatches = sorted(key for key, value in expected.items() if current['ini'].get(key) != value)
+            if mismatches:
+                error = Hold('forwarded_INI_effective_value_mismatch')
+                error.details = dict(sapi=sapi, directives=mismatches)
+                raise error
             need({x.lower() for x in old_registry['modules']} <= {x.lower() for x in current['modules']}, 'forwarded_extension_parity_failed')
     else:
         for sapi, baseline, observed in (('fpm', plan['source_registry'], target),
@@ -2435,12 +2910,14 @@ def finish_configuration(plan, job, journal, alternatives, alternative_modes, af
            target_packages={name: after[name] for name in plan['target_records']},
            Nginx_sockets=sorted(plan['socket_map'].values()), web_smoke_checks=True,
            application_compatibility_claim=False, legacy_packages_preserved=True,
-           scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False)))
+           scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False, adopted_vendor_socket=socket_overrides)))
     journal.phase('complete', PHP_version=target['version'], legacy_retirement_required=plan['mode'] == 'migration',
                   scope='Nginx_FPM_and_default_CLI', hardcoded_legacy_CLI_jobs_migrated=False)
 
 
-def apply():
+
+
+def apply(adopt_vendor_socket=False):
     need(os.geteuid() == 0, 'root_required')
     identity()
     BASE.mkdir(mode=0o700, exist_ok=True)
@@ -2452,12 +2929,18 @@ def apply():
             raise Hold('another_PHP85_job_is_running')
         verify_preflight_archive_journals()
         verify_preinstall_recovery_journals()
+        verify_postconfiguration_journals()
+        if (BASE / 'current.json').exists():
+            pending_current = _preinstall_json(BASE / 'current.json')
+            if pending_current.get('version') == '1.0.9' and pending_current.get('phase') != 'complete':
+                print(json.dumps(continue_v109_configuration(pending_current, adopt_vendor_socket)), flush=True)
+                return
         verify_configuration_continuation_journals()
         if (BASE / 'current.json').exists():
             previous = json.loads(safe_file(BASE / 'current.json', True))
             if previous.get('phase') != 'complete':
                 if previous.get('version') == '1.0.6':
-                    print(json.dumps(continue_v106_configuration(previous)), flush=True)
+                    print(json.dumps(continue_v106_configuration(previous, adopt_vendor_socket)), flush=True)
                     return
                 if previous.get('version') == '1.0.5':
                     recovered = recover_v105_preinstall(previous)
@@ -2485,7 +2968,7 @@ def apply():
             journal.phase('refreshing_indexes')
             command(['/usr/bin/apt-get'] + apt_options() + ['-o', 'APT::Update::Error-Mode=any', 'update'], 300)
             held = package_locks()
-            plan = inspect()
+            plan = inspect(adopt_vendor_socket=adopt_vendor_socket)
             atomic(job / 'plan.json', encoded(plan))
             atomic(job / 'plan.sha256', (digest(encoded(plan)) + '\n').encode())
             journal.phase('plan_sealed', source=plan['source_branch'], target=TARGET,
@@ -2556,7 +3039,7 @@ def apply():
             if plan['mode'] == 'migration' or plan['changes']:
                 for name, value in alternatives.items():
                     command(['/usr/bin/update-alternatives', '--set', name, value])
-            finish_configuration(plan, job, journal, alternatives, alternative_modes, after)
+            finish_configuration(plan, job, journal, alternatives, alternative_modes, after, adopt_vendor_socket=adopt_vendor_socket)
         except BaseException as error:
             journal.phase('failed_needs_review', reason=str(error) if isinstance(error, Hold) else type(error).__name__,
                           recovery=str(job / 'recovery.json') if (job / 'recovery.json').exists() else None,
@@ -2606,18 +3089,20 @@ def main():
     modes.add_argument('--plan-only', action='store_true')
     modes.add_argument('--status', action='store_true')
     modes.add_argument('--rollback', action='store_true')
+    parser.add_argument('--adopt-vendor-socket', action='store_true')
     args = parser.parse_args()
+    need(not args.adopt_vendor_socket or args.apply or args.plan_only, 'socket_adoption_requires_explicit_plan_or_apply')
     need(os.geteuid() == 0, 'root_required')
     if args.status:
         print(safe_file(BASE / 'current.json', True).decode() if (BASE / 'current.json').exists() else json.dumps(dict(status='no_job')))
     elif args.apply:
-        apply()
+        apply(adopt_vendor_socket=args.adopt_vendor_socket)
     elif args.rollback:
         rollback()
     else:
-        plan = inspect()
+        plan = inspect(adopt_vendor_socket=args.adopt_vendor_socket)
         print(json.dumps(dict(mode='plan-only', version=VERSION, host=plan['host'], source=plan['source_branch'],
-            target=TARGET, operation=plan['mode'], packages=sorted(plan['target_records']),
+            target=TARGET, operation=plan['mode'], adopt_vendor_socket=args.adopt_vendor_socket, packages=sorted(plan['target_records']),
             changed_packages=sorted(plan['changes']), socket_map=plan['socket_map'], sites=len(plan['nginx']['health']),
             plan_sha256=digest(encoded(plan)), note='APT indexes were not refreshed; apply refreshes and seals a new local plan.'), indent=2))
 

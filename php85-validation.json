@@ -1,20 +1,20 @@
 {
-  "PHP85_updater_version": "1.0.9",
+  "PHP85_updater_version": "1.0.10",
   "Python_3_10_grammar": true,
   "bash_syntax": true,
-  "bootstrap_self_tests": "{\"status\": \"bootstrap-fixtures-pass\", \"modes\": 5, \"pipeline_modes\": 2, \"truncation_prefixes\": 106, \"version_metadata_from_core_literal\": true, \"unsafe_environment_rejected\": true, \"minimal_core_environment\": true, \"invalid_option_rejected\": true, \"corrupt_payload_rejected\": true, \"real_core_executed\": false, \"package_actions\": 0, \"service_actions\": 0}",
+  "bootstrap_self_tests": "{\"status\": \"bootstrap-fixtures-pass\", \"modes\": 7, \"pipeline_modes\": 4, \"truncation_prefixes\": 106, \"version_metadata_from_core_literal\": true, \"vendor_socket_opt_in_forwarded_explicit_modes\": true, \"unsafe_environment_rejected\": true, \"minimal_core_environment\": true, \"invalid_option_rejected\": true, \"corrupt_payload_rejected\": true, \"real_core_executed\": false, \"package_actions\": 0, \"service_actions\": 0}",
   "errors": 0,
   "failures": 0,
   "files": {
-    "README-php85.md": "8a7898a4a7a19a67468e302ea6dc26eb6578aa0a7b371393e7e54f7c763bd4c3",
-    "build_php85_release.py": "a6dd2f6480974c1b04a7026963d60f26ac41a0356510c90c600a7aa937d7fea3",
-    "php85-packaging-review.json": "759e8e2be3308179ed860b581b84a9e3ea2d193c4f80785d4eb0bfe47e49c273",
-    "php85.sh": "a288fdbba94ef3a056076d4e5e0c37f706481cd7d3c2e498e82de427c38846e0",
+    "README-php85.md": "77b845f3bf22cdeca77252227eadfe2a474c4fb3fdc2e81e825db12a36f620db",
+    "build_php85_release.py": "8da82d64bbae1ebb37dffbe3646b4fa039404ccd2a7979b12c752d86ecbdaac7",
+    "php85-packaging-review.json": "707dceee3bbebb18decc9547faa40ef1f6aecc3c2f0766d18ac3700d6eb3e222",
+    "php85.sh": "7ba064a4217dd0a5f2a464875ae92457f3538cef6415c6de61ac84a607c815b6",
     "php85_runtime.py": "29857391d1637630760351af38a8cffc2ebfd54174532dc5d0e31706fff8fd2c",
-    "php85_upgrade.py": "b09929b996936f1b9e72e3222bc1f9300a1a11bab905bc82fe5d8c923b003ca6",
+    "php85_upgrade.py": "531a00fcd30186c16e1c7c6eb3fee7796ac3bdb0c482b504d1574d27da6d3992",
     "test_php85_runtime.py": "264fa380490edbb8eb290287d6264d0ee971f9d937d02e7e34849dbd6a053201",
     "test_php85_security.py": "a860fde1d140728fd9c5a180c078e8e62fb0cc34c378cba83bdad0c1f5ae332c",
-    "test_php85_upgrade.py": "6d990aaee8006938720693a90af86d4a3e9ded3887ad342ce4c6046ba9a25fd2"
+    "test_php85_upgrade.py": "36426e98e332df8bdcb335a760f40e304d552cb2e68633c6a917f13d69992039"
   },
   "live_migration_tested": false,
   "production_execution": false,
@@ -43,8 +43,8 @@
       "errors": 0,
       "failures": 0,
       "skips": 0,
-      "tests": 133
+      "tests": 147
     }
   },
-  "tests": 218
+  "tests": 232
 }

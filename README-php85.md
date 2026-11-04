@@ -101,7 +101,7 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.9 retains five narrowly defined automatic preflight recovery cases on the
+Version 1.0.10 retains five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
@@ -218,3 +218,29 @@ the configuration-only continuation, before its proofs or target writes. This
 does not refresh indexes or construct an APT package cache. Unexpected failures
 record only the exception type and bounded updater function/line locations;
 exception messages, local values and source text are omitted.
+
+Version 1.0.10 adds an explicit `--adopt-vendor-socket` policy option paired with
+`--plan-only` or `--apply` (mode first). Planning remains read-only. The option
+is limited to a source `mysqli.default_socket` value of null with mysqli and
+mysqlnd present, and a verified standard local MySQL socket. It does not waive
+other nullable settings, change an explicit old socket, reconfigure MySQL or
+connect to the database. Existing old sealed plans and failure evidence remain
+preserved; resuming an admitted configuration failure requires its separate
+exact continuation checks.
+
+```sh
+wget -qO- https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/main/php85.sh | sudo bash -s -- --plan-only --adopt-vendor-socket
+wget -qO- https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/main/php85.sh | sudo bash -s -- --apply --adopt-vendor-socket
+```
+
+For the exact admitted v1.0.9 configuration failure, the socket opt-in uses a
+separate one-use continuation. It verifies the prior started receipt, original
+sealed plan and successful package evidence, source service and configuration,
+inactive target FPM, the exact two owned migration INIs, and a mismatch limited
+to the reviewed null mysqli socket setting. Vendor-only PHP module loading
+checks the target default without connecting to MySQL; filesystem aliases, the
+live native MySQL listener, package-owned executable, process identity and socket
+ownership must agree. The old pending receipt, failure pointer and INI bytes are
+preserved. Only those two INIs are rewritten before the normal configuration,
+runtime and HTTPS checks and cutover. APT is not replayed. An interrupted or
+changed continuation remains held; the flag does not authorize a general retry.

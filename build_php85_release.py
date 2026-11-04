@@ -50,7 +50,9 @@ def main():
     uid=int(sys.argv[1]);args=sys.argv[2:]
     require(uid==os.geteuid(),'bootstrap_effective_user_changed')
     require(sys.version_info>=(3,10),'system_Python_3_10_or_newer_required')
-    require(args in ([],['--plan-only'],['--apply'],['--status'],['--rollback']),'unsupported_bootstrap_arguments')
+    require(args in ([],['--plan-only'],['--apply'],['--status'],['--rollback'],
+                    ['--apply','--adopt-vendor-socket'],['--plan-only','--adopt-vendor-socket']),
+            'unsupported_bootstrap_arguments')
     compressed=base64.b64decode(BLOB,validate=True)
     require(hashlib.sha256(compressed).hexdigest()==COMPRESSED_SHA,'compressed_payload_checksum_mismatch')
     with gzip.GzipFile(fileobj=io.BytesIO(compressed),mode='rb') as stream:
@@ -58,7 +60,7 @@ def main():
     require(len(payload)==PAYLOAD_SIZE and hashlib.sha256(payload).hexdigest()==PAYLOAD_SHA,
             'complete_payload_checksum_mismatch')
     compile(payload,'php85_upgrade.py','exec')
-    if args==['--apply']:
+    if '--apply' in args:
         parent=__APPLY_BASE__
         safe_directory(os.path.dirname(parent),uid)
         try:os.mkdir(parent,0o700)
@@ -101,8 +103,8 @@ php85_bootstrap() (
     [[ "${!#}" == '__SENTINEL__' ]] || { echo 'Incomplete PHP85 bootstrap' >&2; exit 1; }
     set -- "${@:1:$#-1}"
     [[ "$EUID" -eq 0 ]] || { echo 'Run this updater with sudo or as root.' >&2; exit 1; }
-    [[ "$#" -le 1 ]] || { echo 'Use only --plan-only, --apply, --status, or --rollback.' >&2; exit 1; }
-    case "${1-}" in ''|--plan-only|--apply|--status|--rollback) ;; *) echo 'Unsupported PHP85 option.' >&2; exit 1 ;; esac
+    [[ "$#" -le 2 ]] || { echo 'Use --plan-only or --apply with optional --adopt-vendor-socket; --status or --rollback alone.' >&2; exit 1; }
+    case "$*" in ''|--plan-only|--apply|--status|--rollback|'--apply --adopt-vendor-socket'|'--plan-only --adopt-vendor-socket') ;; *) echo 'Unsupported PHP85 option combination.' >&2; exit 1 ;; esac
     for php85_unsafe in LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV APT_CONFIG PYTHONPATH PYTHONHOME; do
         [[ ! -v "$php85_unsafe" ]] || { echo "Remove unsafe environment variable: $php85_unsafe" >&2; exit 1; }
     done
@@ -150,7 +152,8 @@ def verify_artifact(shell, expected):
 
 def self_test():
     """Exercise the generated logic with a harmless fixture core, never real core."""
-    for version in ('1.0.0', '1.0.1', '1.0.2', '1.0.3', '1.0.4', '1.0.5', '1.0.6'):
+    for version in ('1.0.0', '1.0.1', '1.0.2', '1.0.3', '1.0.4', '1.0.5', '1.0.6',
+                    '1.0.7', '1.0.8', '1.0.9', '1.0.10'):
         assert core_version(('VERSION = '+repr(version)+'\n').encode()) == version
     for invalid in (b'pass\n', b"VERSION = 'unknown'\n", b"VERSION='1.0.0'\nVERSION='1.0.1'\n"):
         try:
@@ -174,12 +177,14 @@ def self_test():
         script = script.replace(repr('/run').encode(), repr(str(root)).encode())
         path = root / 'bootstrap.sh'
         path.write_bytes(script)
-        for flags in ([], ['--plan-only'], ['--apply'], ['--status'], ['--rollback']):
+        allowed_modes=([],['--plan-only'],['--apply'],['--status'],['--rollback'],
+                       ['--apply','--adopt-vendor-socket'],['--plan-only','--adopt-vendor-socket'])
+        for flags in allowed_modes:
             result = subprocess.run(['/bin/bash', str(path)] + flags, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             assert result.returncode == 0, result.stderr.decode()
             assert json.loads(marker.read_text()) == flags
             marker.unlink()
-        for flags in ([], ['--apply']):
+        for flags in ([], ['--apply'],['--apply','--adopt-vendor-socket'],['--plan-only','--adopt-vendor-socket']):
             result = subprocess.run(['/bin/bash', '-s', '--'] + flags, input=script,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             assert result.returncode == 0, result.stderr.decode()
@@ -188,6 +193,11 @@ def self_test():
         assert not list(root.rglob('php85-bootstrap-*'))
         result = subprocess.run(['/bin/bash', str(path), '--unknown'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert result.returncode != 0 and not marker.exists()
+        for flags in (['--adopt-vendor-socket'],['--adopt-vendor-socket','--apply'],
+                      ['--status','--adopt-vendor-socket'],['--rollback','--adopt-vendor-socket'],
+                      ['--apply','--apply'],['--adopt-vendor-socket','--adopt-vendor-socket']):
+            result=subprocess.run(['/bin/bash',str(path)]+flags,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            assert result.returncode!=0 and not marker.exists(),flags
         for key in ('APT_CONFIG', 'PYTHONPATH', 'LD_LIBRARY_PATH'):
             environment=dict(os.environ);environment[key]=str(root)
             result=subprocess.run(['/bin/bash',str(path),'--apply'],env=environment,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -207,8 +217,9 @@ def self_test():
         assert result.returncode != 0 and not marker.exists()
         assert not list(root.rglob('php85-bootstrap-*'))
         subprocess.run(['/bin/bash', '-n'], input=production, check=True)
-    result = dict(status='bootstrap-fixtures-pass', modes=5, pipeline_modes=2, truncation_prefixes=len(cuts),
+    result = dict(status='bootstrap-fixtures-pass', modes=7, pipeline_modes=4, truncation_prefixes=len(cuts),
                           version_metadata_from_core_literal=True,
+                          vendor_socket_opt_in_forwarded_explicit_modes=True,
                           unsafe_environment_rejected=True, minimal_core_environment=True,
                           invalid_option_rejected=True, corrupt_payload_rejected=True, real_core_executed=False,
                           package_actions=0, service_actions=0)
