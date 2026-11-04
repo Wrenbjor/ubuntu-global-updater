@@ -101,7 +101,7 @@ verifies it without rewriting Nginx, acting on services or changing alternatives
 Existing APT source enabled/disabled state is preserved; this tool never enables
 a disabled source as part of planning or apply.
 
-Version 1.0.7 retains five narrowly defined automatic preflight recovery cases on the
+Version 1.0.8 retains five narrowly defined automatic preflight recovery cases on the
 same `--apply` command: the exact byte-pinned version 1.0.0
 `nginx_path_outside_config` failure, and the exact byte-pinned version 1.0.1
 `absolute_nginx_include_required` failure, plus the exact byte-pinned version
@@ -203,3 +203,12 @@ old source, plan, backups and failure-pointer bytes, and records a durable
 continuation receipt before configuration writes. It does not rerun APT or
 create a fresh installation job. Interrupted continuation remains blocked for
 inspection; it is not automatically replayed.
+
+Version 1.0.8 recognizes both stock module INI packaging layouts during that
+configuration-only continuation: a unique matching shared vendor template, or a
+directly installed `mods-available` file with one matching installed package
+owner and unchanged dpkg Conffiles or package-file checksum evidence. This
+includes standard PECL packages that do not ship a separate shared template.
+Canonical module link names and priorities remain required; modified, unowned,
+ambiguous, obsolete or symlinked direct files still hold. No package operation
+is added to the continuation, and repository trust is not changed.

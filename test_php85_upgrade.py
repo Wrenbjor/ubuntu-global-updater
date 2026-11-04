@@ -3520,14 +3520,106 @@ class V105PreinstallRecoveryFixtures(Offline):
         self.assertEqual(result['preserved'],result['old_files'])
 
 
+class DirectPackageIniTransportFixture(unittest.TestCase):
+    def test_actual_dpkg_query_reads_only_synthetic_status_DB_and_emits_Conffiles_lines(self):
+        raw=b'; priority=25\nextension=redis.so\n';logical='/etc/php/8.5/mods-available/redis.ini'
+        checksum=M.hashlib.md5(raw,usedforsecurity=False).hexdigest()
+        with tempfile.TemporaryDirectory(prefix='php85-dpkg-status-fixture-') as temporary:
+            admin=Path(temporary)
+            (admin/'status').write_text('Package: php8.5-redis\nStatus: install ok installed\nArchitecture: amd64\n'
+                'Version: 6.3.0\nMaintainer: Fixture <fixture@example.invalid>\nConffiles:\n '+logical+' '+checksum+
+                '\nDescription: Synthetic read-only package inventory\n\n')
+            commands=[];native=Path
+            class IniPath:
+                def __init__(self,path):self.path=native(path)
+                def __str__(self):return str(self.path)
+                def __eq__(self,other):return isinstance(other,IniPath) and self.path==other.path
+                def is_symlink(self):return False
+                def resolve(self,strict=False):return self
+            def query(args,*unused):
+                self.assertEqual(args,['/usr/bin/dpkg-query','-W','-f=${Conffiles}\\n','php8.5-redis'])
+                actual=[args[0],'--admindir='+str(admin)]+args[1:];commands.append(actual)
+                result=M.subprocess.run(actual,stdout=M.subprocess.PIPE,stderr=M.subprocess.PIPE,
+                    timeout=10,env=dict(PATH='/usr/bin:/bin',LANG='C',LC_ALL='C'),check=True)
+                self.assertTrue(result.stdout.endswith(b'\n'));self.assertNotIn(b'\\n',result.stdout)
+                return result.stdout.decode()
+            with patch.object(M,'Path',IniPath),patch.object(M,'safe_file',return_value=raw),\
+                 patch.object(M,'command',side_effect=query):
+                self.assertEqual(M.installed_package_INI('php8.5-redis',logical),raw)
+            self.assertEqual(len(commands),1)
+
+
+class DirectPackageIniFixtures(Offline):
+    def exercise(self, layout='conffile', mutation=None):
+        package='php8.5-redis';path='/etc/php/8.5/mods-available/redis.ini'
+        raw=b'; priority=25\nextension=redis.so\n';reads=[];commands=[]
+        checksum=M.hashlib.md5(raw,usedforsecurity=False).hexdigest()
+        conffiles=' '+path+' '+checksum+'\n' if layout=='conffile' else ''
+        if mutation=='modified':conffiles=' '+path+' '+'0'*32+'\n'
+        if mutation=='obsolete':conffiles=conffiles.rstrip()+' obsolete\n'
+        if mutation=='duplicate':conffiles+=conffiles
+        if mutation=='malformed':conffiles=' '+path+' invalid\n'
+        inventory='/var/lib/dpkg/info/'+package+'.md5sums'
+        inventories={inventory:(checksum+'  '+path.lstrip('/')+'\n').encode()}
+        if mutation=='unowned':conffiles='';inventories={}
+        if mutation=='duplicate-inventory':
+            conffiles='';inventories[inventory.replace('.md5sums',':amd64.md5sums')]=inventories[inventory]
+        native=Path
+        class IniPath:
+            def __init__(self,value):self.path=native(value)
+            def __str__(self):return str(self.path)
+            def __eq__(self,other):return isinstance(other,IniPath) and self.path==other.path
+            def is_symlink(self):return mutation=='symlink' and str(self)==path
+            def is_file(self):return str(self) in inventories
+            def resolve(self,strict=False):
+                return IniPath('/tmp/redis.ini') if mutation=='noncanonical' and str(self)==path else self
+        def safe_read(request,*unused):
+            request=str(request);reads.append(request)
+            if request in inventories:return inventories[request]
+            self.assertEqual(request,path)
+            if mutation in ('unsafe-owner','unsafe-mode'):raise M.Hold('unsafe_fixture_module_INI')
+            if mutation=='read-race' and reads.count(path)>1:return raw+b'; drift\n'
+            return raw
+        def command(args,*unused):
+            commands.append(args)
+            if args==['/usr/bin/dpkg-query','-W','-f=${Conffiles}\\n',package]:return conffiles
+            if args==['/usr/bin/dpkg','--print-architecture']:return 'amd64\n'
+            raise AssertionError('unapproved fixture command '+repr(args))
+        with patch.object(M,'Path',IniPath),patch.object(M,'safe_file',side_effect=safe_read),\
+             patch.object(M,'command',side_effect=command):
+            result=M.installed_package_INI(package,path)
+        self.assertEqual(result,raw);return commands
+
+    def test_direct_conffile_checksum_and_nonconffile_md5_inventory_are_supported(self):
+        for layout in ('conffile','md5sums'):
+            with self.subTest(layout=layout):self.exercise(layout)
+
+    def test_modified_unowned_obsolete_duplicate_noncanonical_and_racing_INIs_hold(self):
+        for mutation in ('modified','obsolete','duplicate','malformed','unowned','duplicate-inventory',
+                         'symlink','noncanonical','unsafe-owner','unsafe-mode','read-race'):
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(M.Hold):self.exercise(mutation=mutation)
+
+
 class ContinuationVendorIniFixtures(Offline):
-    def exercise(self, mutation=None):
+    def exercise(self, mutation=None, direct_module=None):
         profiles={sapi:{'/etc/php/8.5/'+sapi+'/php.ini':'stock '+sapi+'\n',
             '/etc/php/8.5/'+sapi+'/conf.d/20-curl.ini':'extension=curl.so\n'} for sapi in ('cli','fpm')}
         templates={'/usr/lib/php/8.5/php.ini-production.cli':b'stock cli\n',
             '/usr/lib/php/8.5/php.ini-production':b'stock fpm\n',
             '/usr/share/php8.5-curl/curl/curl.ini':b'extension=curl.so\n'}
         inventory={'php8.5-common':list(templates)[:2],'php8.5-curl':[list(templates)[2]]}
+        module=direct_module or 'curl'
+        if direct_module:
+            raw='extension='+module+'.so\n'
+            profiles={sapi:{'/etc/php/8.5/'+sapi+'/php.ini':'stock '+sapi+'\n',
+                '/etc/php/8.5/'+sapi+'/conf.d/20-'+module+'.ini':raw} for sapi in ('cli','fpm')}
+            templates.pop('/usr/share/php8.5-curl/curl/curl.ini')
+            direct_path='/etc/php/8.5/mods-available/'+module+'.ini'
+            templates[direct_path]=raw.encode()
+            inventory.pop('php8.5-curl');inventory['php8.5-'+module]=[direct_path]
+            if mutation=='direct-unowned':inventory['php8.5-'+module]=[]
+            if mutation=='direct-duplicate-owner':inventory['php8.5-common'].append(direct_path)
         if mutation=='changed-main':profiles['cli']['/etc/php/8.5/cli/php.ini']='memory_limit=999M\n'
         if mutation=='changed-module':
             for settings in profiles.values():settings[next(p for p in settings if '/conf.d/' in p)]='curl.allow_local_infile=On\n'
@@ -3556,9 +3648,10 @@ class ContinuationVendorIniFixtures(Offline):
             def parent(self):return IniPath(self.path.parent)
             @property
             def name(self):return self.path.name
-            def is_symlink(self):return mutation!='extra-plain'
+            def is_symlink(self):return '/conf.d/' in str(self.path) and mutation!='extra-plain'
             def resolve(self,strict=False):
-                return IniPath('/tmp/curl.ini' if mutation=='outside-alias' else '/etc/php/8.5/mods-available/curl.ini')
+                if '/conf.d/' not in str(self.path):return self
+                return IniPath('/tmp/curl.ini' if mutation=='outside-alias' else '/etc/php/8.5/mods-available/'+module+'.ini')
         calls=[]
         def read(path,*unused):
             path=str(path.path) if isinstance(path,IniPath) else str(path)
@@ -3570,7 +3663,11 @@ class ContinuationVendorIniFixtures(Offline):
             calls.append((package,path))
             if mutation=='vendor-inventory-drift':raise M.Hold('installed_vendor_file_changed')
         def command(args,*unused):
-            self.assertEqual(args[:2],['/usr/bin/dpkg-query','-L']);return '\n'.join(inventory[args[2]])
+            if args[:2]==['/usr/bin/dpkg-query','-L']:return '\n'.join(inventory[args[2]])
+            self.assertEqual(args,['/usr/bin/dpkg-query','-W','-f=${Conffiles}\\n','php8.5-'+module])
+            raw=templates[direct_path]
+            checksum='0'*32 if mutation=='direct-bad-checksum' else M.hashlib.md5(raw,usedforsecurity=False).hexdigest()
+            return ' '+direct_path+' '+checksum+'\n'
         with patch.object(M,'Path',IniPath),patch.object(M,'command',side_effect=command),\
              patch.object(M,'safe_file',side_effect=read),patch.object(M,'installed_vendor_file',side_effect=vendor):
             M._configuration_vendor_profiles(profiles,{name:{} for name in inventory})
@@ -3589,6 +3686,22 @@ class ContinuationVendorIniFixtures(Offline):
 
     def test_declared_vendor_priority_25_uses_the_canonical_link_name(self):
         calls=self.exercise('priority25-good');self.assertEqual(len(calls),3)
+
+    def test_six_direct_package_module_layouts_and_shared_templates_are_both_supported(self):
+        self.exercise()
+        for module in ('igbinary','imagick','imap','msgpack','memcached','redis'):
+            with self.subTest(module=module):
+                calls=self.exercise(direct_module=module);self.assertEqual(len(calls),2)
+
+    def test_direct_profile_owner_absent_or_ambiguous_holds_before_fallback_trust(self):
+        for mutation in ('direct-unowned','direct-duplicate-owner'):
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(M.Hold):self.exercise(mutation,direct_module='redis')
+
+    def test_direct_bad_checksum_diagnostic_contains_only_file_and_package_names(self):
+        with self.assertRaises(M.Hold) as caught:self.exercise('direct-bad-checksum',direct_module='redis')
+        self.assertEqual(caught.exception.details,dict(file='/etc/php/8.5/mods-available/redis.ini',packages=['php8.5-redis']))
+        self.assertNotIn('extension=',json.dumps(caught.exception.details))
 
 
 class PoolFixtures(Offline):

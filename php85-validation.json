@@ -1,20 +1,20 @@
 {
-  "PHP85_updater_version": "1.0.7",
+  "PHP85_updater_version": "1.0.8",
   "Python_3_10_grammar": true,
   "bash_syntax": true,
   "bootstrap_self_tests": "{\"status\": \"bootstrap-fixtures-pass\", \"modes\": 5, \"pipeline_modes\": 2, \"truncation_prefixes\": 106, \"version_metadata_from_core_literal\": true, \"unsafe_environment_rejected\": true, \"minimal_core_environment\": true, \"invalid_option_rejected\": true, \"corrupt_payload_rejected\": true, \"real_core_executed\": false, \"package_actions\": 0, \"service_actions\": 0}",
   "errors": 0,
   "failures": 0,
   "files": {
-    "README-php85.md": "e0d8fc679ff24a98621174b37ce0908b96ab2b4c56dedcd3e26b247b19e9af87",
+    "README-php85.md": "801dcbd089c516d883ac6ca0371fd4511932809c04c293887a975231861facfc",
     "build_php85_release.py": "a6dd2f6480974c1b04a7026963d60f26ac41a0356510c90c600a7aa937d7fea3",
-    "php85-packaging-review.json": "f982998591d56e8b4dd5529783f6842d147643227819e97604b6947329eaa526",
-    "php85.sh": "d1eb88a67343356092401db9224343cd2d587a627f88d5bdfae1103648038b99",
+    "php85-packaging-review.json": "d2a036e4ffc49cf44af7b16de8bf5fbbc0c8f7d9f586af36b121b10b4f784634",
+    "php85.sh": "3af0610478b30ee90f9e1f7e0111ba3a102d35e3fda943e7bc4f8fcdf512498f",
     "php85_runtime.py": "29857391d1637630760351af38a8cffc2ebfd54174532dc5d0e31706fff8fd2c",
-    "php85_upgrade.py": "b703bd3ae627f4b092064b05419d45cdf04eb7be2509b01052cc639ad0730c1c",
+    "php85_upgrade.py": "471b07f882b48becb6d84d26de38b084279c6a97a3e15197164cfad4e1b70e50",
     "test_php85_runtime.py": "264fa380490edbb8eb290287d6264d0ee971f9d937d02e7e34849dbd6a053201",
     "test_php85_security.py": "a860fde1d140728fd9c5a180c078e8e62fb0cc34c378cba83bdad0c1f5ae332c",
-    "test_php85_upgrade.py": "d48f44a06bdd61d65147ccd1bb2d9e5d30dd72a2e667cf551c35642ec7b83842"
+    "test_php85_upgrade.py": "1f9b39b15eb7c563de5cca6eb99fadd015abb744fed7a6ec38e98575dccb366d"
   },
   "live_migration_tested": false,
   "production_execution": false,
@@ -43,8 +43,8 @@
       "errors": 0,
       "failures": 0,
       "skips": 0,
-      "tests": 122
+      "tests": 128
     }
   },
-  "tests": 207
+  "tests": 213
 }

@@ -20,7 +20,7 @@ import uuid
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlsplit
 
-VERSION = '1.0.7'
+VERSION = '1.0.8'
 PREFLIGHT_V100_SHA256 = 'c1a39b696236d6e45d250ddc7efe1a2370c5606727721b8a7ea87dcc1c850002'
 PREFLIGHT_V101_SHA256 = '6213fbc4e25fe377b09fa27851f489f0f3de815d5874fcd1632c9ba4f17d41a6'
 PREFLIGHT_V102_SHA256 = 'b0e18a2fdca61c7e956ee5c9f0b649be50b39695e560110a1a3142dbfa03e78d'
@@ -1934,6 +1934,34 @@ def rollback():
 CONTINUATION_V106_SHA256 = '09ea4c451a7bcd5aa4248aded6e5dabefae1b54c602f3dd49ed02ad73245d80f'
 
 
+def installed_package_INI(package, path):
+    """Verify a directly packaged module INI against dpkg's installed inventory.
+
+    Package/version/archive authentication remains the sealed plan's separate gate.
+    Conffiles are normally absent from the package md5sums control file.
+    """
+    need(NAME.fullmatch(package) is not None and package.startswith('php8.5-'), 'invalid_module_INI_package')
+    logical = Path(path)
+    need(re.fullmatch(r'/etc/php/8\.5/mods-available/[A-Za-z0-9_-]+\.ini', str(logical))
+         and not logical.is_symlink() and logical.resolve(strict=True) == logical,
+         'noncanonical_packaged_module_INI')
+    raw = safe_file(logical)
+    records = []
+    for line in command(['/usr/bin/dpkg-query', '-W', '-f=${Conffiles}\\n', package]).splitlines():
+        fields = line.split()
+        if fields and fields[0] == str(logical):
+            records.append(fields)
+    if records:
+        need(len(records) == 1 and len(records[0]) == 2
+             and re.fullmatch(r'[0-9a-f]{32}', records[0][1]), 'ambiguous_or_obsolete_module_INI_conffile')
+        need(hashlib.md5(raw, usedforsecurity=False).hexdigest() == records[0][1],
+             'packaged_module_INI_modified_requires_review')
+    else:
+        installed_vendor_file(package, str(logical))
+    need(safe_file(logical) == raw, 'packaged_module_INI_changed_during_verification')
+    return raw
+
+
 def _configuration_vendor_profiles(profiles, after):
     """Admit only freshly installed, package-proven default target INI bytes."""
     inventory = {}
@@ -1947,9 +1975,16 @@ def _configuration_vendor_profiles(profiles, after):
     def vendor(path):
         if path not in verified:
             owners = inventory.get(path, [])
-            need(len(owners) == 1, 'configuration_continuation_INI_template_owner_ambiguous')
-            installed_vendor_file(owners[0], path)
-            verified[path] = safe_file(path)
+            try:
+                need(len(owners) == 1, 'configuration_continuation_INI_template_owner_ambiguous')
+                if path.startswith('/etc/php/8.5/mods-available/'):
+                    verified[path] = installed_package_INI(owners[0], path)
+                else:
+                    installed_vendor_file(owners[0], path)
+                    verified[path] = safe_file(path)
+            except Hold as error:
+                error.details = dict(file=path, packages=owners)
+                raise
         return verified[path]
     for sapi, settings in profiles.items():
         seen_modules = set()
@@ -1969,8 +2004,13 @@ def _configuration_vendor_profiles(profiles, after):
             need(raw == text.encode(), 'configuration_continuation_target_INI_changed')
             candidates = [p for p in inventory if Path(p).name == resolved.name
                           and re.match(r'^/usr/share/php8\.5-[A-Za-z0-9+.-]+/', p)]
-            matches = [p for p in candidates if vendor(p) == raw]
-            need(len(matches) == 1, 'configuration_continuation_target_INI_not_unique_vendor_template')
+            if candidates:
+                matches = [p for p in candidates if vendor(p) == raw]
+                need(len(matches) == 1, 'configuration_continuation_target_INI_not_unique_vendor_template')
+            else:
+                # Some extension packages ship the mods-available file directly.
+                # File-list membership alone is insufficient: verify its recorded checksum.
+                need(vendor(str(resolved)) == raw, 'configuration_continuation_packaged_module_INI_changed')
             # Match php-common's get_priority/get_live_link convention exactly.
             priorities = re.findall(r'(?m)^;[ \t]*priority[ \t]*=[ \t]*([0-9]+)[ \t]*$', text)
             need(len(priorities) <= 1, 'configuration_continuation_INI_priority_ambiguous')
