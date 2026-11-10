@@ -11,13 +11,16 @@ sudo bash php85.sh --status
 No option means plan-only. Status reads native versions, service state and Nginx
 configuration. Apply uses ordinary repository, APT and service commands. It
 refreshes indexes and installs matching PHP 8.5 extensions, reuses a configured 8.5 pool
-or prepares the standard pool/common settings, backs up the affected routes,
+or migrates the source pools and selected common settings, backs up the affected routes,
 and switches their literal Unix sockets. Native configuration, version and HTTP
 checks determine success; deprecation stderr alone is not a failed native test.
-The supported layout has one standard `www.conf` pool, one active web PHP branch,
-literal Unix socket routes and primary HTTPS hostnames in the route files.
+The supported layout has one active web PHP branch and one pool per `.conf`
+file (multiple pools supported). Direct literal Unix sockets under `/run/php`
+or `/var/run/php` are matched to pool ownership rather than a filename convention.
+Custom sockets receive distinct `.php85.sock` destinations; old pools remain intact.
+Primary HTTPS hostnames must still be in the route files.
 
-The script does not read previous updater checkpoints or perform OS upgrades,
+The script does not read legacy updater checkpoints or perform OS upgrades,
 database-major changes, WordPress changes, purge or autoremove. Keep the SSH
 session open and retain the printed backup location. Unknown layouts and failed
 checks require inspection. Existing PHP packages are retained; package-lock
@@ -34,12 +37,24 @@ repository indexes, apply stops before PHP package installation. It never silent
 substitutes a newer patch. CLI and FPM must report exactly8.5.12 before completion.
 This is not a permanent APT hold: later package maintenance can change PHP.
 
-This candidate is **not yet a general 135-server fleet migration**. Multiple/custom
-pools and sockets, shared Nginx includes without a hostname, and custom FPM
-globals still require implementation work.
+This candidate is **not yet a general 135-server fleet migration**. Same-branch
+multiple/custom pools and sockets are supported. Source global FPM values are
+preserved with target PID and branch-local include paths; external/nested FPM
+includes and mixed active PHP branches stop for review. An existing customized
+8.5 target is only reused for the compatible single-standard-pool case.
+Shared Nginx includes without a hostname still require integration work.
+Only the documented common INI settings whitelist is migrated; custom loaders,
+module enable/disable parity, and other extension-specific directives are not
+automatically proven compatible.
 Health checks use each discovered primary HTTPS homepage, not WordPress-specific
 paths. A successful homepage is only a smoke test, not full application validation.
-Failure after changing Nginx does not roll back automatically. Do not deploy this candidate as the completed fleet updater.
+Cutover/health failures restore unchanged-by-others route files, the original CLI
+alternative and the post-package/pre-migration target configuration. Package
+installation itself is **not** rolled back. Concurrent edits are preserved and
+cause rollback to stop. `/root/php85-active-run` retains the backup path after an
+unrecoverable interruption or incomplete rollback and blocks another apply until
+an operator reconciles the recorded state. It is not an automatic resume feature.
+Do not deploy this candidate as the completed fleet updater.
 
 The OS installer remains a separate, older OS-first path ending at24.04. It is
 not yet suitable for PHP-first22.04→24.04→26.04. See `FLEET-UPGRADE-PLAN.md`.

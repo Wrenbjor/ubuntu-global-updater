@@ -3,18 +3,19 @@
     "php85.sh"
   ],
   "files": {
-    "README-php85.md": "d65f97395ae4e43ad33bfb0e5ac53beb2532649cea240e699ad8fd34ea82180a",
+    "README-php85.md": "d4a9ca0e31c0457aa1821f4319a2770d1507825942e2b5c8f002fe809b1464e4",
     "build_php85_release.py": "8217a29000fb5f7ad3f3a61de19a63db39cdb8e1fa09dca9dc1addfe756a514b",
-    "php85-validation.json": "db9239d48ec7ab6ffff05d58129e09d1340632113d82384cadd8dc2e8dd0f9a0",
-    "php85.sh": "1cbc2cdeaeca0c6b469c5c05142d4097bae21b77b41efe5a3515a78681852487",
-    "test_php85_shell.py": "91c9b1690b2cfbf28d808700376b7c3074b71959ab0b9e5ef8fd5a47da9795f6",
-    "FLEET-UPGRADE-PLAN.md": "cb7b5bdb2102521ca09787e1fdedf723f2e32a32c962c9e818ca76d65497e561",
-    "forge-php85-recipe.sh": "49a2cbfae57d54ca0064f05a6f16e7f526fd9a50a218ec58dae5d3532602ddaf"
+    "php85-validation.json": "820bc43734ba009b39e5fbc7defd68fd05f7e2f5f894e3fa82c0b14bf9ba836f",
+    "php85.sh": "edc6ba3916f94171ebc85757049e09d5dda99acab9b8260896e079c6ac563b1d",
+    "test_php85_shell.py": "c9a421666a2f795bfb3b2db6b46aeeee4528d357fd8c5bc5e0ba3fd831c17ec7",
+    "FLEET-UPGRADE-PLAN.md": "92b814560487cd1fe50037f88ea8379a239fdd43707d5ff0fccf91a857dc788e",
+    "forge-php85-recipe.sh": "49a2cbfae57d54ca0064f05a6f16e7f526fd9a50a218ec58dae5d3532602ddaf",
+    "test_php85_fleet.py": "f971e85bbe2eef41877643ef461a0b87f313494e91388851688a3400e17dfab9"
   },
-  "independent_source_review": "pending for local changes",
+  "independent_source_review": "pending for dynamic fleet and rollback changes",
   "previous_Python_modules": "Historical references; not downloaded or executed by php85.sh",
   "production_execution": false,
-  "profile": "Ubuntu 22.04/24.04; standard Nginx/direct Unix route; one www FPM pool",
-  "reviewed_source_sha256": "1cbc2cdeaeca0c6b469c5c05142d4097bae21b77b41efe5a3515a78681852487",
-  "version": "3.0.1-local-candidate"
+  "profile": "Ubuntu 22.04/24.04; same-branch multiple FPM pools; direct local Unix routes; hostname in route file",
+  "reviewed_source_sha256": "edc6ba3916f94171ebc85757049e09d5dda99acab9b8260896e079c6ac563b1d",
+  "version": "3.1.0-local-candidate"
 }

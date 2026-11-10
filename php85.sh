@@ -33,10 +33,31 @@ fi
 nginx -t
 dump=$(nginx -T 2>/dev/null)
 route_count=$(grep -cE '^[[:space:]]*fastcgi_pass[[:space:]]' <<<"$dump" || true)
-routes=$(sed -nE 's@^[[:space:]]*fastcgi_pass[[:space:]]+unix:/(var/)?run/php/php(7\.[234]|8\.[0-5])-fpm\.sock[[:space:]]*;[[:space:]]*(#.*)?$@\2@p' <<<"$dump")
-[[ $(wc -l <<<"$routes") -eq $route_count ]] || die 'Use direct, unquoted Unix PHP-FPM routes for this script'
-mapfile -t branches < <(sort -u <<<"$routes")
-[[ ${#branches[@]} -eq 1 && -n ${branches[0]} ]] || die 'One active web PHP branch is required'
+all_route_count=$(awk '{sub(/#.*/, ""); n+=gsub(/fastcgi_pass[[:space:]]/, "&")} END{print n+0}' <<<"$dump")
+[[ $all_route_count -eq $route_count ]] || die 'Inline or multi-line FastCGI directives require context-aware discovery; no partial migration performed'
+# Resolve actual Unix listeners to their pool configuration, not filename guesses.
+routes=$(sed -nE 's@^[[:space:]]*fastcgi_pass[[:space:]]+unix:([^;[:space:]]+)[[:space:]]*;[[:space:]]*(#.*)?$@\1@p' <<<"$dump")
+[[ $route_count -gt 0 && $(wc -l <<<"$routes") -eq $route_count ]] || die 'Use direct, unquoted Unix PHP-FPM routes for this script'
+declare -A pool_for_socket branch_for_socket target_socket ambiguous_socket
+for pool in "$config_root"/php/{7.*,8.*}/fpm/pool.d/*.conf; do
+    [[ -f $pool ]] || continue
+    branch=${pool#"$config_root/php/"}; branch=${branch%%/*}
+    [[ $branch =~ ^(7\.[234]|8\.[0-5])$ ]] || continue
+    listener=$(awk -F= '/^[[:space:]]*listen[[:space:]]*=/{sub(/[;#].*/,"",$2);gsub(/[[:space:]]/,"",$2);print $2}' "$pool")
+    [[ $listener == /run/php/*.sock || $listener == /var/run/php/*.sock ]] || continue
+    listener=${listener/#\/var\/run\//\/run\/}
+    if [[ -v pool_for_socket[$listener] ]]; then ambiguous_socket[$listener]=1; fi
+    pool_for_socket[$listener]=$pool; branch_for_socket[$listener]=$branch
+done
+branches=()
+while IFS= read -r listener; do
+    listener=${listener/#\/var\/run\//\/run\/}
+    [[ ! -v ambiguous_socket[$listener] ]] || die "Ambiguous active listener $listener in multiple pool configurations"
+    [[ -v branch_for_socket[$listener] ]] || die "No configured FPM pool owns Nginx listener $listener"
+    branches+=("${branch_for_socket[$listener]}")
+done <<<"$routes"
+mapfile -t branches < <(printf '%s\n' "${branches[@]}" | sort -u)
+[[ ${#branches[@]} -eq 1 ]] || die 'Mixed active PHP branches need a per-site migration plan'
 source=${branches[0]}
 mapfile -t files < <(awk '/^# configuration file / {f=$0;sub(/^# configuration file /,"",f);sub(/:$/,"",f)} /^[[:space:]]*fastcgi_pass[[:space:]]/ {print f}' <<<"$dump" | sort -u)
 for i in "${!files[@]}"; do
@@ -51,12 +72,35 @@ for file in "${files[@]}"; do
 done
 old_pool="$config_root/php/$source/fpm/pool.d/www.conf"
 new_pool="$config_root/php/8.5/fpm/pool.d/www.conf"
-[[ -f $old_pool && $(find "$config_root/php/$source/fpm/pool.d" -maxdepth 1 -name '*.conf' | wc -l) -eq 1 ]] || die 'This script supports one standard www pool'
-listen=$(awk -F= '/^[[:space:]]*listen[[:space:]]*=/{sub(/[;#].*/,"",$2);gsub(/[[:space:]]/,"",$2);v=$2}END{print v}' "$old_pool")
-[[ $listen == "/run/php/php$source-fpm.sock" || $listen == "/var/run/php/php$source-fpm.sock" ]] || die 'Source www pool does not match the web socket'
-for pool in "$config_root/php/8.5/fpm/pool.d/"*.conf; do
-    [[ ! -f $pool || $pool == "$new_pool" ]] || die 'Additional PHP 8.5 pools require their own service plan'
+source_pools=()
+for pool in "$config_root/php/$source/fpm/pool.d/"*.conf; do
+    [[ -f $pool && ! -L $pool && -O $pool ]] || die "Unsafe/missing pool configuration: $pool"
+    # One named pool per file is the normal Forge layout. Do not guess through includes.
+    [[ $(grep -cE '^[[:space:]]*\[[^]]+\]' "$pool" || true) -eq 1 ]] || die "Multiple sections in pool file: $pool"
+    ! grep -qE '^[[:space:]]*include[[:space:]]*=' "$pool" || die "Nested pool include needs review: $pool"
+    listener=$(awk -F= '/^[[:space:]]*listen[[:space:]]*=/{sub(/[;#].*/,"",$2);gsub(/[[:space:]]/,"",$2);print $2}' "$pool")
+    [[ $listener =~ ^/(var/)?run/php/[A-Za-z0-9_.-]+\.sock$ ]] || die "Only local /run/php Unix listeners supported: $pool"
+    listener=${listener/#\/var\/run\//\/run\/}
+    if [[ $source == 8.5 ]]; then next=$listener
+    elif [[ $listener == /run/php/php$source-fpm.sock ]]; then next=/run/php/php8.5-fpm.sock
+    else next=${listener%.sock}.php85.sock; fi
+    [[ $source == 8.5 || ! -v pool_for_socket[$next] || ${branch_for_socket[$next]} == 8.5 ]] || die "Target socket collides with another PHP branch: $next"
+    target_socket[$listener]=$next
+    source_pools+=("$pool")
 done
+# A custom existing 8.5 pool is reusable only for the simple legacy single-pool case.
+# A separate target service with additional pools must never be overwritten implicitly.
+for pool in "$config_root/php/8.5/fpm/pool.d/"*.conf; do
+    [[ ! -f $pool || $source == 8.5 || $pool == "$new_pool" ]] || die 'Additional PHP 8.5 pools require their own service plan'
+done
+old_global="$config_root/php/$source/fpm/php-fpm.conf"
+if [[ -f $old_global ]]; then
+    [[ ! -L $old_global && -O $old_global ]] || die 'Unsafe source FPM global configuration'
+    # Preserve customized global values, but only known branch-local pool includes.
+    while IFS= read -r include; do
+        [[ $include == "/etc/php/$source/fpm/pool.d/*.conf" || $include == "$config_root/php/$source/fpm/pool.d/*.conf" ]] || die "External FPM include requires review: $include"
+    done < <(awk -F= '/^[[:space:]]*include[[:space:]]*=/{sub(/[;#].*/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);print $2}' "$old_global")
+fi
 table=$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n')
 mapfile -t packages < <({
     printf 'php8.5-cli\nphp8.5-fpm\nphp8.5-common\n'
@@ -68,7 +112,7 @@ echo "Host: $(hostname); Ubuntu $VERSION_ID; web PHP $source -> $target"
 printf 'PHP packages: '; printf '%s ' "${packages[@]}"; echo
 if [[ $apply == 0 ]]; then
     echo 'PLAN: ensure ppa:ondrej/php for this Ubuntu release; apt-get update; apt-get install --no-remove the listed PHP packages.'
-    echo 'PLAN: back up configs; reuse a configured 8.5 pool or copy the source www pool/settings; change Nginx socket routes.'
+    echo 'PLAN: back up configs; reuse a compatible 8.5 pool or migrate all source pools/global settings; change Nginx socket routes.'
     echo 'PLAN: test/restart PHP 8.5 FPM; test/reload Nginx; check CLI/FPM versions and primary homepage responses.'
     exit 0
 fi
@@ -78,10 +122,16 @@ mkdir -p "$run_root/ubuntu-php-updater"
 chmod 700 "$run_root/ubuntu-php-updater"
 exec 9>"$run_root/ubuntu-php-updater/worker.lock"
 flock -n 9 || die 'Another PHP/Ubuntu updater is running'
+checkpoint="$home_root/php85-active-run"
+[[ ! -e $checkpoint && ! -L $checkpoint ]] || die "An interrupted/failed rollback needs review: $checkpoint (contains its backup directory). No retry mutations performed."
 backup=$(mktemp -d "$home_root/php85-backup.XXXXXX")
+printf '%s\n' "$backup" >"$checkpoint"
 echo "Backups and private logs: $backup"
 timers=()
 success=0
+target_changed=0
+target_written=0
+routes_changed=()
 cli_before=$(update-alternatives --query php 2>/dev/null | awk '/^Value: /{print $2}' || true)
 update-alternatives --query php >"$backup/cli-before.txt" 2>&1 || true
 restore_timers() {
@@ -91,16 +141,61 @@ restore_timers() {
         for timer in "${pending[@]}"; do systemctl is-active --quiet "$timer"; done
     fi
 }
+# Snapshot after APT, before our configuration changes. Package installation is
+# not reversible here; this restores configuration/routing, never old binaries.
+snapshot_target_config() {
+    cp -a -- "$config_root/php/8.5" "$backup/target-before-migration"
+    target_changed=1
+}
 cleanup() {
-    local rc=$?
-    if [[ $success == 0 && -n $cli_before && -x $cli_before && $rc != 130 && $rc != 143 ]]; then
-        update-alternatives --set php "$cli_before" >>"$backup/services.log" 2>&1 || rc=1
+    local rc=$? rollback_ok=1 file
+    trap - EXIT INT TERM
+    set +e
+    if [[ $success == 0 ]]; then
+        [[ $rc != 0 ]] || rc=1
+        for file in "${routes_changed[@]}"; do
+            # Never discard a concurrent edit made after our own cutover.
+            if cmp -s "$file" "$backup/$file"; then
+                : # interrupted before this route was replaced
+            elif cmp -s "$file" "$backup/route-written$file"; then
+                cp -a -- "$backup/$file" "$file" || rollback_ok=0
+            else
+                echo "ROLLBACK BLOCKED: route changed externally: $file" >&2
+                rollback_ok=0
+            fi
+        done
+        if ((${#routes_changed[@]})); then
+            nginx -t >>"$backup/services.log" 2>&1 && systemctl reload nginx >>"$backup/services.log" 2>&1 || rollback_ok=0
+        fi
+        if [[ $target_changed == 1 ]]; then
+            # Preserve failed configuration for diagnosis; avoid destructive rm.
+            if [[ $target_written != 1 ]] || ! diff -qr -- "$config_root/php/8.5" "$backup/target-written" >>"$backup/services.log" 2>&1; then
+                echo 'ROLLBACK BLOCKED: target config changed externally or migration interrupted before snapshot' >&2
+                rollback_ok=0
+            elif mv -- "$config_root/php/8.5" "$backup/target-failed" &&
+               cp -a -- "$backup/target-before-migration" "$config_root/php/8.5"; then
+                php-fpm8.5 -t >>"$backup/services.log" 2>&1 && systemctl restart php8.5-fpm >>"$backup/services.log" 2>&1 || rollback_ok=0
+            else
+                rollback_ok=0
+            fi
+        fi
+        if [[ -n $cli_before && -x $cli_before ]]; then
+            update-alternatives --set php "$cli_before" >>"$backup/services.log" 2>&1 || rollback_ok=0
+        fi
     fi
-    restore_timers || rc=1
-    [[ $rc == 0 ]] || echo "FAILED: inspect $backup; no automatic rollback was performed" >&2
+    restore_timers || { rollback_ok=0; rc=1; }
+    if [[ $rollback_ok == 1 ]]; then
+        rm -f -- "$checkpoint"
+        [[ $success == 1 ]] || echo "FAILED: configuration/route/CLI rollback finished; packages were NOT rolled back. Inspect $backup" >&2
+    else
+        rc=1
+        echo "FAILED: rollback incomplete; retry blocked by $checkpoint. Inspect $backup" >&2
+    fi
     exit "$rc"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 for timer in apt-daily.timer apt-daily-upgrade.timer; do
     if systemctl is-active --quiet "$timer"; then timers+=("$timer"); fi
 done
@@ -158,18 +253,34 @@ echo 'Installing/updating PHP 8.5 and matching extensions...'
 apt-get -y --no-remove -o DPkg::Lock::Timeout=60 -o APT::Get::AllowUnauthenticated=false -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${pins[@]}" "${protected[@]}" >>"$backup/apt.log" 2>&1
 [[ -z $cli_before || ! -x $cli_before ]] || update-alternatives --set php "$cli_before" >>"$backup/services.log" 2>&1
 if [[ $source != 8.5 ]]; then
-    old_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$old_pool")
-    new_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$new_pool")
-    template=$(dpkg-query -L php8.5-fpm | awk '/^\/usr\/share\/.*\/www.conf$/{print}')
+    snapshot_target_config
     stock=0
-    if [[ -n $template && -f $template ]] && cmp -s "$new_pool" "$template"; then stock=1; fi
-    if [[ $stock == 0 ]]; then
-        checksum=$(dpkg-query -W -f='${Conffiles}' php8.5-fpm | awk -v p="$new_pool" '$1==p && NF==2{print $2}')
-        if [[ -n $checksum && $(md5sum "$new_pool" | awk '{print $1}') == "$checksum" ]]; then stock=1; fi
-    fi
+    if [[ -f $new_pool ]]; then
+        template=$(dpkg-query -L php8.5-fpm | awk '/^\/usr\/share\/.*\/www.conf$/{print}')
+        if [[ -n $template && -f $template ]] && cmp -s "$new_pool" "$template"; then stock=1; fi
+        if [[ $stock == 0 ]]; then
+            checksum=$(dpkg-query -W -f='${Conffiles}' php8.5-fpm | awk -v p="$new_pool" '$1==p && NF==2{print $2}')
+            if [[ -n $checksum && $(md5sum "$new_pool" | awk '{print $1}') == "$checksum" ]]; then stock=1; fi
+        fi
+    else stock=1; fi
     if [[ $stock == 1 ]]; then
-        cp -a -- "$old_pool" "$new_pool"
-        sed -i -E '/^[[:space:]]*listen[[:space:]]*=/s@php7\.[234]-fpm\.sock|php8\.[0-4]-fpm\.sock@php8.5-fpm.sock@' "$new_pool"
+        # Preserve every source pool and its permissions. Avoid collisions with the old
+        # service by assigning a separate target socket to each pool.
+        rm -f -- "$new_pool"
+        for pool in "${source_pools[@]}"; do
+            dest="$config_root/php/8.5/fpm/pool.d/${pool##*/}"
+            cp -a -- "$pool" "$dest"
+            listener=$(awk -F= '/^[[:space:]]*listen[[:space:]]*=/{sub(/[;#].*/,"",$2);gsub(/[[:space:]]/,"",$2);print $2}' "$pool")
+            listener=${listener/#\/var\/run\//\/run\/}
+            next=${target_socket[$listener]}
+            sed -i -E "s@^([[:space:]]*listen[[:space:]]*=[[:space:]]*)[^;#]*@\\1$next @" "$dest"
+        done
+        if [[ -f $old_global ]]; then
+            cp -a -- "$old_global" "$config_root/php/8.5/fpm/php-fpm.conf"
+            # Branch-specific PID/log/include paths must not collide with old FPM.
+            sed -i "s@/php/$source/@/php/8.5/@g;s@php$source-fpm@php8.5-fpm@g" "$config_root/php/8.5/fpm/php-fpm.conf"
+            sed -i -E 's@^([[:space:]]*pid[[:space:]]*=).*@\1 /run/php/php8.5-fpm.pid@' "$config_root/php/8.5/fpm/php-fpm.conf"
+        fi
         # Copy only application/settings directives, not old extension loaders or deprecated SID knobs.
         for sapi in fpm cli; do
             n=0
@@ -182,14 +293,23 @@ if [[ $source != 8.5 ]]; then
             done
         done
     else
+        [[ ${#source_pools[@]} -eq 1 && ${source_pools[0]} == "$old_pool" ]] || die 'Existing custom PHP 8.5 pool conflicts with multi-pool migration'
+        old_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$old_pool")
+        new_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$new_pool")
         [[ $new_identity == "$old_identity" ]] && grep -qE '^[[:space:]]*listen[[:space:]]*=[[:space:]]*/(var/)?run/php/php8\.5-fpm\.sock[[:space:]]*$' "$new_pool" || die 'Existing PHP 8.5 pool differs; inspect its user/group/socket before overwriting it'
     fi
+fi
+if [[ $target_changed == 1 ]]; then
+    cp -a -- "$config_root/php/8.5" "$backup/target-written"
+    target_written=1
 fi
 php-fpm8.5 -t >>"$backup/services.log" 2>&1
 systemctl enable php8.5-fpm >>"$backup/services.log" 2>&1
 systemctl restart php8.5-fpm >>"$backup/services.log" 2>&1
 systemctl is-active --quiet php8.5-fpm
-[[ -S $run_root/php/php8.5-fpm.sock ]] || die 'PHP 8.5 socket is missing'
+for next in "${target_socket[@]}"; do
+    [[ -S $run_root/${next#/run/} ]] || die "PHP 8.5 socket is missing: $next"
+done
 pid=$(systemctl show php8.5-fpm -p MainPID --value)
 [[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] && [[ $(stat -Lc '%d:%i' "$proc_root/$pid/exe") == "$(stat -Lc '%d:%i' "$(command -v php-fpm8.5)")" ]] || die 'FPM is not running the installed PHP 8.5 binary'
 fpm_version=$(php-fpm8.5 -v 2>>"$backup/services.log")
@@ -197,7 +317,18 @@ fpm_version=$(php-fpm8.5 -v 2>>"$backup/services.log")
 [[ $(. "$config_root/os-release"; echo "$VERSION_ID") == "$VERSION_ID" ]] || die 'Ubuntu release changed during this run'
 for file in "${files[@]}"; do
     cmp -s "$file" "$backup/$file" || die 'Nginx configuration changed during package installation'
-    sed -i -E '/^[[:space:]]*fastcgi_pass[[:space:]]/s@php7\.[234]-fpm\.sock|php8\.[0-4]-fpm\.sock@php8.5-fpm.sock@' "$file"
+    staged=$(mktemp "$(dirname "$file")/.php85-route.XXXXXX")
+    cp -a -- "$file" "$staged"
+    for listener in "${!target_socket[@]}"; do
+        next=${target_socket[$listener]}
+        escaped=${listener//./\\.}
+        # Match the complete socket token, leaving comments and unrelated text intact.
+        sed -i -E "/^[[:space:]]*fastcgi_pass[[:space:]]/s@unix:($escaped|/var$escaped)([[:space:]]*;)@unix:$next\\2@" "$staged"
+    done
+    mkdir -p -- "$backup/route-written$(dirname "$file")"
+    cp -a -- "$staged" "$backup/route-written$file"
+    routes_changed+=("$file")
+    mv -f -- "$staged" "$file"
 done
 nginx -t >>"$backup/services.log" 2>&1
 systemctl reload-or-restart nginx >>"$backup/services.log" 2>&1

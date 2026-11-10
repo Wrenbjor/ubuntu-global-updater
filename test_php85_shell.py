@@ -55,6 +55,9 @@ if name=='timeout':
     assert args[1] in ('apt-get','add-apt-repository')
     os.execv(str(root/'bin'/args[1]),args[1:])
 if name=='systemctl':
+    if args[:2]==['reload-or-restart','nginx'] and scenario.get('terminate_cutover'):
+        import signal
+        os.kill(os.getppid(),signal.SIGTERM)
     state=root/'service-state.json'
     data=json.loads(state.read_text()) if state.exists() else {'apt-daily.timer':True,'apt-daily-upgrade.timer':False,'php8.5-fpm':True,'nginx':True}
     if args[0]=='show':done('123')
@@ -71,7 +74,16 @@ if name=='php-fpm8.5':
     if '-t' in args and scenario.get('deprecation'):print('PHP Deprecated: fixture warning',file=sys.stderr)
     if '-t' in args and scenario.get('bad_fpm'):done('',1)
     done('PHP '+scenario.get('runtime_version','8.5.12')+' (fpm-fcgi)' if '-v' in args else '')
-if name=='curl':done('503' if scenario.get('bad_health') else '200')
+if name=='curl':
+    count=root/'curl-count'
+    n=int(count.read_text())+1 if count.exists() else 1;count.write_text(str(n))
+    if scenario.get('concurrent_edit') and n>1:
+        site=config/'nginx/sites-available/site.conf'
+        site.write_text(site.read_text()+'# external edit\n')
+    if scenario.get('concurrent_target_edit') and n>1:
+        target=config/'php/8.5/fpm/pool.d/www.conf'
+        target.write_text(target.read_text()+'; external target edit\n')
+    done('503' if scenario.get('bad_health') else '200')
 if name=='chown':done('')
 raise SystemExit('Unexpected fixture command '+name+' '+repr(args))
 '''
@@ -89,10 +101,13 @@ class BashFixtures(unittest.TestCase):
                 'systemctl','update-alternatives','php','php8.5','php-fpm8.5','curl','chown'):(bin/name).symlink_to('proxy')
             proc=root/'proc';(proc/'123').mkdir(parents=True);(proc/'123/exe').symlink_to(bin/'php-fpm8.5')
             (root/'scenario.json').write_text(json.dumps(scenario))
+            if scenario.get('interrupted_checkpoint'):(home/'php85-active-run').write_text('/root/previous-backup\n')
             site=config/'nginx/sites-available/site.conf';site.parent.mkdir(parents=True)
             branch='8.5' if scenario.get('web85') else '7.4'
             text=('server {\n server_name example.com www.example.com;\n include forge-conf/site/before/*;\n'
                 ' location ~ \\.php$ {\n  include fastcgi_params;\n  fastcgi_pass unix:/run/php/php'+branch+'-fpm.sock;\n }\n}\n')
+            if scenario.get('multipool'):text=text.replace(' }\n}\n',' }\n location /customer {\n  fastcgi_pass unix:/run/php/customer.sock; # customer\n }\n}\n')
+            if scenario.get('inline_route'):text=text.replace(' }\n}\n',' }\n location /other { fastcgi_pass unix:/run/php/other.sock; }\n}\n')
             site.write_text(text);site.chmod(0o640)
             if scenario.get('no_hostname'):site.write_text(text.replace('server_name example.com www.example.com;','server_name _;'))
             enabled=config/'nginx/sites-enabled/site.conf';enabled.parent.mkdir();enabled.symlink_to('../sites-available/site.conf')
@@ -105,6 +120,9 @@ class BashFixtures(unittest.TestCase):
                 for sapi in ('cli','fpm'):
                     folder=config/('php/'+phpbranch+'/'+sapi);(folder/'conf.d').mkdir(parents=True,exist_ok=True)
                     (folder/'php.ini').write_text('memory_limit=512M\nextension=fixture.so\nsession.sid_length=26\n')
+            if scenario.get('multipool'):
+                (config/'php/7.4/fpm/pool.d/extra.conf').write_text('[extra]\nuser=forge\ngroup=forge\nlisten=/run/php/customer.sock\n')
+            (config/'php/7.4/fpm/php-fpm.conf').write_text('[global]\npid=/run/php/php7.4-fpm.pid\nprocess.max=99\ninclude='+str(config/'php/7.4/fpm/pool.d/*.conf')+'\n')
             if scenario.get('extra_pool'):(config/'php/8.5/fpm/pool.d/extra.conf').write_text('[extra]\nlisten=/run/php/extra.sock\n')
             template=root/'usr/share/php8.5-fpm/pool.d/www.conf';template.parent.mkdir(parents=True);template.write_text(stock)
             old=home/'old-checkpoint.json';old.write_bytes(b'old failed evidence\n')
@@ -112,11 +130,12 @@ class BashFixtures(unittest.TestCase):
             mock_socket=os.environ.get('PHP85_TEST_MOCK_SOCKET')=='1'
             if mock_socket:
                 (run/'php/php8.5-fpm.sock').touch()
+                if scenario.get('multipool'):(run/'php/customer.php85.sock').touch()
             else:
                 sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
                 sock.bind(str(run/'php/php8.5-fpm.sock'))
             original=SOURCE.read_text();script=original
-            if mock_socket:script=script.replace('[[ -S $run_root/php/php8.5-fpm.sock ]]','[[ -f $run_root/php/php8.5-fpm.sock ]]')
+            if mock_socket:script=script.replace('[[ -S $run_root/${next#/run/} ]]','[[ -f $run_root/${next#/run/} ]]')
             replacements={'config_root=/etc':'config_root='+str(config),'run_root=/run':'run_root='+str(run),
                 'proc_root=/proc':'proc_root='+str(proc),
                 'home_root=/root':'home_root='+str(home),'PATH=/usr/sbin:/usr/bin:/sbin:/bin':'PATH='+str(bin)+':/usr/bin:/bin',
@@ -129,6 +148,9 @@ class BashFixtures(unittest.TestCase):
             try:
                 result=subprocess.run(['/bin/bash',str(path)]+args,cwd=root,env=dict(PATH='/usr/bin:/bin',HOME=str(home),LANG='C',LC_ALL='C'),
                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+                if scenario.get('rerun') and result.returncode==0 and cut is None:
+                    result=subprocess.run(['/bin/bash',str(path)]+args,cwd=root,env=dict(PATH='/usr/bin:/bin',HOME=str(home),LANG='C',LC_ALL='C'),
+                        stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
             finally:
                 if sock is not None:sock.close()
             calls=[json.loads(line) for line in (root/'commands.jsonl').read_text().splitlines()] if (root/'commands.jsonl').exists() else []
@@ -137,8 +159,8 @@ class BashFixtures(unittest.TestCase):
             target=config/'php/8.5/fpm/pool.d/www.conf'
             overlays={sapi:[p.read_text() for p in (config/('php/8.5/'+sapi+'/conf.d')).glob('99-legacy-*')] for sapi in ('cli','fpm')}
             return dict(rc=result.returncode,stdout=result.stdout.decode(),stderr=result.stderr.decode(),calls=calls,
-                site=site.read_text(),original=text,symlink=enabled.is_symlink(),backup=saved,backup_count=len(backups),
-                target=target.read_text(),target_mode=target.stat().st_mode&0o777,ready=ready,overlays=overlays,old=old.read_bytes())
+                checkpoint=(home/'php85-active-run').exists(),site=site.read_text(),original=text,symlink=enabled.is_symlink(),backup=saved,backup_count=len(backups),
+                global_config=(config/'php/8.5/fpm/php-fpm.conf').read_text() if (config/'php/8.5/fpm/php-fpm.conf').exists() else '',extra_target=(config/'php/8.5/fpm/pool.d/extra.conf').read_text() if (config/'php/8.5/fpm/pool.d/extra.conf').exists() else '',target=target.read_text(),target_mode=target.stat().st_mode&0o777,ready=ready,overlays=overlays,old=old.read_bytes())
 
     def test_exact_target_is_pinned(self):
         r=self.exercise({'candidate_version':'8.5.13-1+ubuntu22.04.1+deb.sury.org+1'});self.assertEqual(r['rc'],0,r['stderr'])
@@ -227,6 +249,44 @@ class BashFixtures(unittest.TestCase):
     def test_already85_web_and_bad_final_health_are_reported_truthfully(self):
         r=self.exercise({'web85':True});self.assertEqual(r['rc'],0,r['stderr']);self.assertEqual(r['site'],r['original'])
         r=self.exercise({'bad_health':True});self.assertNotEqual(r['rc'],0);self.assertNotIn('COMPLETE',r['stdout'])
+
+    def test_failed_health_restores_routes_and_cli_without_package_rollback(self):
+        r=self.exercise({'bad_health':True,'stock':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertEqual(r['site'],r['original'])
+        self.assertFalse(r['checkpoint'])
+        self.assertIn('packages were NOT rolled back',r['stderr'])
+        self.assertTrue(any(c[:3]==['systemctl','reload','nginx'] for c in r['calls']))
+        self.assertTrue(any(c[:3]==['update-alternatives','--set','php'] for c in r['calls']))
+        self.assertFalse(any(c[0]=='apt-get' and ('remove' in c or 'purge' in c) for c in r['calls']))
+
+    def test_termination_at_cutover_rolls_back_and_exits_nonzero(self):
+        r=self.exercise({'terminate_cutover':True,'stock':True})
+        self.assertEqual(r['rc'],143)
+        self.assertEqual(r['site'],r['original'])
+        self.assertFalse(r['checkpoint'])
+        self.assertNotIn('COMPLETE',r['stdout'])
+
+    def test_concurrent_target_edit_is_not_overwritten_during_rollback(self):
+        r=self.exercise({'concurrent_target_edit':True,'bad_health':True,'stock':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertIn('; external target edit',r['target'])
+        self.assertTrue(r['checkpoint'])
+        self.assertEqual(r['site'],r['original'])
+
+    def test_interrupted_run_blocks_apply_before_package_mutation(self):
+        r=self.exercise({'interrupted_checkpoint':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertIn('interrupted/failed rollback',r['stderr'])
+        self.assertEqual(r['backup_count'],0)
+        self.assertFalse(any(c[0]=='apt-get' for c in r['calls']))
+
+    def test_rollback_does_not_discard_concurrent_route_edit(self):
+        r=self.exercise({'bad_health':True,'concurrent_edit':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertIn('# external edit',r['site'])
+        self.assertTrue(r['checkpoint'])
+        self.assertIn('ROLLBACK BLOCKED',r['stderr'])
 
     def test_incomplete_final_invocation_never_runs_package_or_service_commands(self):
         source=SOURCE.read_bytes();self.assertFalse(source.endswith(b'\n'))

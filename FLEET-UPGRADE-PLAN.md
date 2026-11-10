@@ -8,7 +8,7 @@ Forge metadata synchronization is secondary. No production execution performed.
 
 Local patch selects exact8.5.12 core packages and verifies exact CLI/FPM versions.
 The existing Bash runner is intentionally not presented as fleet-complete: it
-supports one standard www pool. Health probes are now application-neutral HTTPS
+supports same-branch multiple/custom pools with literal local Unix sockets. Health probes are now application-neutral HTTPS
 homepage checks; a commit/checksum-pinned Forge recipe template is included.
 
 ## PHP phase still required
@@ -21,8 +21,11 @@ homepage checks; a commit/checksum-pinned Forge recipe template is included.
 - Existing source binary may be absent; distinguish stale configurations from
   actual active routes, not CLI version or a filename convention.
 - Do not assume repository filename; validate actual enabled same-suite packages.
-- Snapshot route/CLI state and restore on cutover or health failure; preserve
-  old runtime. Package installation rollback is a separate concern.
+- Implemented: snapshot route/CLI state and restore on cutover or health failure;
+  preserve old runtime. Restore post-APT target configuration if no concurrent
+  edits occurred. Package installation rollback remains a separate concern.
+  Interrupted/incomplete rollback blocks retries with a durable checkpoint;
+  fully automatic resume is not implemented.
 - Broader application health checks, runtime module verification, explicit
   per-host result/status, resumable interrupted-state handling, and rerun tests.
 - Publish a reviewed commit and fill its SHA/hash into the included download-first
