@@ -32,8 +32,12 @@ if name=='hostname':done('fixture-host')
 if name=='nginx':
     if '-T' in args:
         site=config/'nginx/sites-enabled/site.conf'
-        done('# configuration file /usr/share/nginx/modules-available/fixture.conf:\nload_module modules/fixture.so;\n'
-            +'# configuration file '+str(site)+':\n'+site.read_text())
+        main=config/'nginx/nginx.conf'
+        extra=config/'nginx/php-shared.conf'
+        done('# configuration file '+str(main)+':\nhttp { include '+str(site)+'; }\n'
+            +'# configuration file '+str(site)+':\n'+site.read_text()
+            +'\n# configuration file '+str(config/'nginx/fastcgi_params')+':\nfastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n'
+            + ('# configuration file '+str(extra)+':\n'+extra.read_text() if extra.exists() else ''))
     if '-v' in args:done('nginx version: fixture')
     done('')
 if name=='apt-cache':
@@ -104,10 +108,14 @@ class BashFixtures(unittest.TestCase):
             if scenario.get('interrupted_checkpoint'):(home/'php85-active-run').write_text('/root/previous-backup\n')
             site=config/'nginx/sites-available/site.conf';site.parent.mkdir(parents=True)
             branch='8.5' if scenario.get('web85') else '7.4'
-            text=('server {\n server_name example.com www.example.com;\n include forge-conf/site/before/*;\n'
+            text=('server {\n listen 443 ssl;\n server_name example.com www.example.com;\n include forge-conf/site/before/*;\n'
                 ' location ~ \\.php$ {\n  include fastcgi_params;\n  fastcgi_pass unix:/run/php/php'+branch+'-fpm.sock;\n }\n}\n')
             if scenario.get('multipool'):text=text.replace(' }\n}\n',' }\n location /customer {\n  fastcgi_pass unix:/run/php/customer.sock; # customer\n }\n}\n')
             if scenario.get('inline_route'):text=text.replace(' }\n}\n',' }\n location /other { fastcgi_pass unix:/run/php/other.sock; }\n}\n')
+            if scenario.get('shared_sites'):
+                (config/'nginx/php-shared.conf').write_text('fastcgi_pass unix:/run/php/php'+branch+'-fpm.sock;\n')
+                text=('server {\n listen 80;\n server_name first.example.com;\n include php-shared.conf;\n}\n'
+                      'server {\n listen 127.0.0.1:8443 ssl;\n server_name second.example.com;\n include php-shared.conf;\n}\n')
             site.write_text(text);site.chmod(0o640)
             if scenario.get('no_hostname'):site.write_text(text.replace('server_name example.com www.example.com;','server_name _;'))
             enabled=config/'nginx/sites-enabled/site.conf';enabled.parent.mkdir();enabled.symlink_to('../sites-available/site.conf')
@@ -159,7 +167,7 @@ class BashFixtures(unittest.TestCase):
             target=config/'php/8.5/fpm/pool.d/www.conf'
             overlays={sapi:[p.read_text() for p in (config/('php/8.5/'+sapi+'/conf.d')).glob('99-legacy-*')] for sapi in ('cli','fpm')}
             return dict(rc=result.returncode,stdout=result.stdout.decode(),stderr=result.stderr.decode(),calls=calls,
-                checkpoint=(home/'php85-active-run').exists(),site=site.read_text(),original=text,symlink=enabled.is_symlink(),backup=saved,backup_count=len(backups),
+                shared=(config/'nginx/php-shared.conf').read_text() if (config/'nginx/php-shared.conf').exists() else '',checkpoint=(home/'php85-active-run').exists(),site=site.read_text(),original=text,symlink=enabled.is_symlink(),backup=saved,backup_count=len(backups),
                 global_config=(config/'php/8.5/fpm/php-fpm.conf').read_text() if (config/'php/8.5/fpm/php-fpm.conf').exists() else '',extra_target=(config/'php/8.5/fpm/pool.d/extra.conf').read_text() if (config/'php/8.5/fpm/pool.d/extra.conf').exists() else '',target=target.read_text(),target_mode=target.stat().st_mode&0o777,ready=ready,overlays=overlays,old=old.read_bytes())
 
     def test_exact_target_is_pinned(self):
@@ -182,7 +190,16 @@ class BashFixtures(unittest.TestCase):
         r=self.exercise();self.assertEqual(r['rc'],0,r['stderr'])
         probes=[c[-1] for c in r['calls'] if c[0]=='curl']
         self.assertTrue(probes)
-        self.assertEqual(set(probes),{'https://example.com/'})
+        self.assertEqual(set(probes),{'https://example.com:443/'})
+
+    def test_shared_snippet_probes_each_server_listener(self):
+        r=self.exercise({'shared_sites':True})
+        self.assertEqual(r['rc'],0,r)
+        probes=[c for c in r['calls'] if c[0]=='curl']
+        self.assertIn('php8.5-fpm.sock',r['shared'])
+        self.assertNotIn('php7.4-fpm.sock',r['shared'])
+        self.assertEqual({c[-1] for c in probes},{'http://first.example.com:80/','https://second.example.com:8443/'})
+        self.assertEqual({c[c.index('--resolve')+1] for c in probes},{'first.example.com:80:127.0.0.1','second.example.com:8443:127.0.0.1'})
 
     def test_default_plan_is_read_only(self):
         r=self.exercise(args=[]);self.assertEqual(r['rc'],0,r['stderr'])
