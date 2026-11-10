@@ -16,7 +16,7 @@ root=Path(__file__).resolve().parent.parent
 scenario=json.loads((root/'scenario.json').read_text())
 with (root/'commands.jsonl').open('a') as log:log.write(json.dumps([name]+args)+'\n')
 config=root/'etc';home=root/'home';run=root/'run'
-version='8.5.13-1+ubuntu'+scenario.get('release','22.04')+'.1+deb.sury.org+1'
+version=scenario.get('package_version','8.5.12')+'-1+ubuntu'+scenario.get('release','22.04')+'.1+deb.sury.org+1'
 def done(text='',rc=0):
     if text:print(text,end='' if text.endswith('\n') else '\n')
     raise SystemExit(rc)
@@ -37,10 +37,11 @@ if name=='nginx':
     if '-v' in args:done('nginx version: fixture')
     done('')
 if name=='apt-cache':
+    if args[0]=='madison':done('' if scenario.get('missing_exact') else args[-1]+' | '+version+' | fixture')
     if len(args)==1:
         suite='noble/main' if scenario.get('wrong_repo') else scenario.get('codename','jammy')+'/main'
         done('500 https://ppa.launchpadcontent.net/ondrej/php/ubuntu '+suite+' amd64 Packages\n' if not scenario.get('missing_repo') else '')
-    done(args[-1]+':\n  Candidate: '+version+'\n')
+    done(args[-1]+':\n  Candidate: '+scenario.get('candidate_version',version)+'\n')
 if name=='apt-get':
     if '-s' in args:
         if scenario.get('remove'):done('Remv mysql-community-server-core [8.0.44]\n')
@@ -65,11 +66,11 @@ if name=='systemctl':
 if name=='update-alternatives':
     if '--query' in args:done('Name: php\nStatus: auto\nValue: '+str(root/'bin/php8.5')+'\n')
     done('')
-if name in ('php','php8.5'):done('CLI PHP 8.5.13')
+if name in ('php','php8.5'):done('CLI PHP 8.5.12')
 if name=='php-fpm8.5':
     if '-t' in args and scenario.get('deprecation'):print('PHP Deprecated: fixture warning',file=sys.stderr)
     if '-t' in args and scenario.get('bad_fpm'):done('',1)
-    done('PHP 8.5.13 (fpm-fcgi)' if '-v' in args else '')
+    done('PHP '+scenario.get('runtime_version','8.5.12')+' (fpm-fcgi)' if '-v' in args else '')
 if name=='curl':done('503' if scenario.get('bad_health') else '200')
 if name=='chown':done('')
 raise SystemExit('Unexpected fixture command '+name+' '+repr(args))
@@ -107,9 +108,15 @@ class BashFixtures(unittest.TestCase):
             if scenario.get('extra_pool'):(config/'php/8.5/fpm/pool.d/extra.conf').write_text('[extra]\nlisten=/run/php/extra.sock\n')
             template=root/'usr/share/php8.5-fpm/pool.d/www.conf';template.parent.mkdir(parents=True);template.write_text(stock)
             old=home/'old-checkpoint.json';old.write_bytes(b'old failed evidence\n')
-            (run/'php').mkdir();sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-            sock.bind(str(run/'php/php8.5-fpm.sock'))
+            (run/'php').mkdir();sock=None
+            mock_socket=os.environ.get('PHP85_TEST_MOCK_SOCKET')=='1'
+            if mock_socket:
+                (run/'php/php8.5-fpm.sock').touch()
+            else:
+                sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+                sock.bind(str(run/'php/php8.5-fpm.sock'))
             original=SOURCE.read_text();script=original
+            if mock_socket:script=script.replace('[[ -S $run_root/php/php8.5-fpm.sock ]]','[[ -f $run_root/php/php8.5-fpm.sock ]]')
             replacements={'config_root=/etc':'config_root='+str(config),'run_root=/run':'run_root='+str(run),
                 'proc_root=/proc':'proc_root='+str(proc),
                 'home_root=/root':'home_root='+str(home),'PATH=/usr/sbin:/usr/bin:/sbin:/bin':'PATH='+str(bin)+':/usr/bin:/bin',
@@ -122,7 +129,8 @@ class BashFixtures(unittest.TestCase):
             try:
                 result=subprocess.run(['/bin/bash',str(path)]+args,cwd=root,env=dict(PATH='/usr/bin:/bin',HOME=str(home),LANG='C',LC_ALL='C'),
                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
-            finally:sock.close()
+            finally:
+                if sock is not None:sock.close()
             calls=[json.loads(line) for line in (root/'commands.jsonl').read_text().splitlines()] if (root/'commands.jsonl').exists() else []
             backups=list(home.glob('php85-backup.*'))
             saved=(backups[0]/str(site).lstrip('/')).read_bytes() if backups and (backups[0]/str(site).lstrip('/')).exists() else None
@@ -131,6 +139,22 @@ class BashFixtures(unittest.TestCase):
             return dict(rc=result.returncode,stdout=result.stdout.decode(),stderr=result.stderr.decode(),calls=calls,
                 site=site.read_text(),original=text,symlink=enabled.is_symlink(),backup=saved,backup_count=len(backups),
                 target=target.read_text(),target_mode=target.stat().st_mode&0o777,ready=ready,overlays=overlays,old=old.read_bytes())
+
+    def test_exact_target_is_pinned(self):
+        r=self.exercise({'candidate_version':'8.5.13-1+ubuntu22.04.1+deb.sury.org+1'});self.assertEqual(r['rc'],0,r['stderr'])
+        install=[c for c in r['calls'] if c[0]=='apt-get' and 'install' in c and '-s' not in c][-1]
+        self.assertIn('php8.5-fpm=8.5.12-1+ubuntu22.04.1+deb.sury.org+1',install)
+
+    def test_unavailable_exact_target_stops_before_install(self):
+        r=self.exercise({'missing_exact':True});self.assertNotEqual(r['rc'],0)
+        self.assertIn('Exact PHP 8.5.12 unavailable',r['stderr'])
+        self.assertFalse(any(c[0]=='apt-get' and 'install' in c for c in r['calls']))
+        self.assertEqual(r['site'],r['original'])
+
+    def test_newer_FPM_runtime_is_not_success(self):
+        r=self.exercise({'runtime_version':'8.5.13'});self.assertNotEqual(r['rc'],0)
+        self.assertIn('not exactly PHP 8.5.12',r['stderr'])
+        self.assertEqual(r['site'],r['original'])
 
     def test_default_plan_is_read_only(self):
         r=self.exercise(args=[]);self.assertEqual(r['rc'],0,r['stderr'])

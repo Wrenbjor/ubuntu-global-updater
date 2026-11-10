@@ -1,4 +1,4 @@
-# PHP 8.5 — Bash
+# PHP 8.5.12 — Bash (local review candidate)
 
 Run as root on the selected native Ubuntu 22.04 or 24.04 Nginx/PHP-FPM host:
 
@@ -24,3 +24,25 @@ checks require inspection. Existing PHP packages are retained; package-lock
 failure stops the run without killing the lock owner. Homepage and login HTTP
 checks must return 2xx or 3xx after the change. HTTP checks are smoke tests, not a compatibility
 audit of every plugin, theme, job or application.
+
+## Exact target and current fleet limits
+
+Core CLI/FPM/common packages are selected at exactly upstream **8.5.12**, even if
+APT's candidate is newer. Independently versioned extensions use their matching
+Ubuntu-release candidates. If the exact core packages are absent from enabled
+repository indexes, apply stops before PHP package installation. It never silently
+substitutes a newer patch. CLI and FPM must report exactly8.5.12 before completion.
+This is not a permanent APT hold: later package maintenance can change PHP.
+
+This candidate is **not yet a general 135-server fleet migration**. Multiple/custom
+pools and sockets, shared Nginx includes without a hostname, custom FPM globals,
+and non-WordPress health paths still require implementation work. The current
+health check requires `/wp-login.php`. Failure after changing Nginx does not roll
+back automatically. Do not deploy this candidate as the completed fleet updater.
+
+The OS installer remains a separate, older OS-first path ending at24.04. It is
+not yet suitable for PHP-first22.04→24.04→26.04. See `FLEET-UPGRADE-PLAN.md`.
+
+Focused checks: `PHP85_TEST_MOCK_SOCKET=1 python3 -B -m unittest test_php85_shell`.
+This mode explicitly substitutes a regular file for the fixture's Unix socket
+when the test environment prohibits sockets; it does not validate real sockets.

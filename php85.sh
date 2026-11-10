@@ -17,7 +17,7 @@ config_root=/etc
 run_root=/run
 proc_root=/proc
 home_root=/root
-target=8.5
+target=8.5.12
 die() { echo "STOP: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die 'Run as root'
 . "$config_root/os-release"
@@ -106,7 +106,7 @@ for timer in apt-daily.timer apt-daily-upgrade.timer; do
 done
 ((${#timers[@]}==0)) || systemctl stop "${timers[@]}"
 for file in "${files[@]}"; do cp -a --parents -- "$file" "$backup/"; done
-for branch in "$source" "$target"; do
+for branch in "$source" 8.5; do
     [[ ! -d $config_root/php/$branch ]] || cp -a --parents -- "$config_root/php/$branch" "$backup/"
 done
 # Record existing site responses; an already-down old PHP service can be repaired.
@@ -139,9 +139,14 @@ pins=()
 for package in "${packages[@]}"; do
     candidate=$(apt-cache policy "$package" | awk '/Candidate:/{print $2}')
     [[ $candidate == *"+ubuntu$VERSION_ID."* ]] || die "No matching-release candidate for $package"
-    if [[ $package == php8.5-cli || $package == php8.5-fpm || $package == php8.5-common ]]; then
-        upstream=${candidate#*:}
-        [[ $upstream =~ ^8\.5\.([0-9]+)[-+] && ${BASH_REMATCH[1]} -ge 12 ]] || die "Candidate below the reviewed PHP 8.5.12 security floor: $package"
+    upstream=${candidate#*:}
+    if [[ $package == php8.5-cli || $package == php8.5-fpm || $package == php8.5-common || $upstream == 8.5.* ]]; then
+        # The requested target is exact, not a minimum/security floor. A newer
+        # candidate must not silently change the fleet's requested version.
+        candidate=$(apt-cache madison "$package" | awk -F'|' -v release="$VERSION_ID" '
+            {v=$2;gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);u=v;sub(/^[0-9]+:/,"",u);
+             if(u ~ /^8[.]5[.]12[-+]/ && index(v,"+ubuntu"release".")) print v}' | sort -Vu | tail -1)
+        [[ -n $candidate ]] || die "Exact PHP 8.5.12 unavailable for $package on Ubuntu $VERSION_ID; no PHP packages installed"
     fi
     pins+=("$package=$candidate")
 done
@@ -188,7 +193,7 @@ systemctl is-active --quiet php8.5-fpm
 pid=$(systemctl show php8.5-fpm -p MainPID --value)
 [[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] && [[ $(stat -Lc '%d:%i' "$proc_root/$pid/exe") == "$(stat -Lc '%d:%i' "$(command -v php-fpm8.5)")" ]] || die 'FPM is not running the installed PHP 8.5 binary'
 fpm_version=$(php-fpm8.5 -v 2>>"$backup/services.log")
-[[ $fpm_version =~ PHP[[:space:]]8\.5\.([0-9]+) && ${BASH_REMATCH[1]} -ge 12 ]] || die 'FPM is not PHP 8.5.12 or newer'
+[[ $fpm_version =~ PHP[[:space:]]8\.5\.12[[:space:]] ]] || die 'FPM is not exactly PHP 8.5.12'
 [[ $(. "$config_root/os-release"; echo "$VERSION_ID") == "$VERSION_ID" ]] || die 'Ubuntu release changed during this run'
 for file in "${files[@]}"; do
     cmp -s "$file" "$backup/$file" || die 'Nginx configuration changed during package installation'
@@ -198,7 +203,7 @@ nginx -t >>"$backup/services.log" 2>&1
 systemctl reload-or-restart nginx >>"$backup/services.log" 2>&1
 systemctl is-active --quiet nginx
 update-alternatives --set php /usr/bin/php8.5 >>"$backup/services.log" 2>&1
-php -n -r 'if (PHP_MAJOR_VERSION!==8 || PHP_MINOR_VERSION!==5 || PHP_RELEASE_VERSION<12) exit(1); echo "CLI PHP ",PHP_VERSION,PHP_EOL;'
+php -n -r 'if (PHP_MAJOR_VERSION!==8 || PHP_MINOR_VERSION!==5 || PHP_RELEASE_VERSION!==12) exit(1); echo "CLI PHP ",PHP_VERSION,PHP_EOL;'
 printf '%s\n' "$fpm_version"
 nginx -v
 nginx -T 2>>"$backup/services.log" | awk '/^[[:space:]]*fastcgi_pass[[:space:]]/{print}'
@@ -212,6 +217,6 @@ done
 [[ -z $(dpkg --audit) ]] || die 'Final package audit failed'
 restore_timers
 success=1
-echo "COMPLETE $(hostname): PHP 8.5, FPM active, Nginx active; backup $backup"
+echo "COMPLETE $(hostname): PHP 8.5.12, FPM active, Nginx active; backup $backup"
 )
 php85_main "$@" 'PHP85_SHELL_V3_COMPLETE'
