@@ -69,7 +69,7 @@ printf 'PHP packages: '; printf '%s ' "${packages[@]}"; echo
 if [[ $apply == 0 ]]; then
     echo 'PLAN: ensure ppa:ondrej/php for this Ubuntu release; apt-get update; apt-get install --no-remove the listed PHP packages.'
     echo 'PLAN: back up configs; reuse a configured 8.5 pool or copy the source www pool/settings; change Nginx socket routes.'
-    echo 'PLAN: test/restart PHP 8.5 FPM; test/reload Nginx; check CLI/FPM versions and primary homepage/login responses.'
+    echo 'PLAN: test/restart PHP 8.5 FPM; test/reload Nginx; check CLI/FPM versions and primary homepage responses.'
     exit 0
 fi
 umask 077
@@ -111,7 +111,7 @@ for branch in "$source" 8.5; do
 done
 # Record existing site responses; an already-down old PHP service can be repaired.
 for host in "${hosts[@]}"; do
-    for path in / /wp-login.php; do
+    for path in /; do
         code=$(curl --noproxy '*' --resolve "$host:443:127.0.0.1" --connect-timeout 3 --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://$host$path" 2>>"$backup/health.log") || true
         echo "BEFORE $host$path HTTP $code" >>"$backup/health.log"
     done
@@ -208,7 +208,7 @@ printf '%s\n' "$fpm_version"
 nginx -v
 nginx -T 2>>"$backup/services.log" | awk '/^[[:space:]]*fastcgi_pass[[:space:]]/{print}'
 for host in "${hosts[@]}"; do
-    for path in / /wp-login.php; do
+    for path in /; do
         code=$(curl --noproxy '*' --resolve "$host:443:127.0.0.1" --connect-timeout 3 --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://$host$path")
         echo "$host$path HTTP $code"
         [[ $code =~ ^[23][0-9][0-9]$ ]] || die 'Website health check failed; configurations and logs are retained'

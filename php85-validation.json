@@ -2,14 +2,17 @@
   "embedded_Python": false,
   "errors": 0,
   "failures": 0,
-  "fixture_log_sha256": "e0b762a9ec6c0d05c2aec47b5e2d545250ecf3b258a3f74cf5a04e945b445fa2",
+  "fixture_log_sha256": "6225a328e77fa787019f5f4725bbc4f129e78addf8fec96fe7990762e5774423",
   "independent_Bash_source_review": "pending for local changes",
   "production_execution": false,
-  "reviewed_source_sha256": "0c5501e988e351a45cb2532ddb108a2473da1ae903073b38d088ac3bdda8be04",
+  "reviewed_source_sha256": "1cbc2cdeaeca0c6b469c5c05142d4097bae21b77b41efe5a3515a78681852487",
   "shell_syntax": true,
   "skips": 0,
   "test_scope": "Mocked package/repository/service commands; explicit mocked socket-file mode. Real Unix socket tests blocked by environment; no live install. Full discovery blocked by absent /usr/bin/php and socket restrictions.",
-  "tests": 16,
+  "tests": 17,
   "version": "3.0.1-local-candidate",
-  "whole_download_guard": true
+  "whole_download_guard": true,
+  "recipe_shell_syntax": true,
+  "recipe_nonroot_refusal": true,
+  "OS_bundle_static_verification": true
 }

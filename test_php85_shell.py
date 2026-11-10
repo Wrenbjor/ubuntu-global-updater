@@ -156,6 +156,12 @@ class BashFixtures(unittest.TestCase):
         self.assertIn('not exactly PHP 8.5.12',r['stderr'])
         self.assertEqual(r['site'],r['original'])
 
+    def test_generic_sites_do_not_require_WordPress_login(self):
+        r=self.exercise();self.assertEqual(r['rc'],0,r['stderr'])
+        probes=[c[-1] for c in r['calls'] if c[0]=='curl']
+        self.assertTrue(probes)
+        self.assertEqual(set(probes),{'https://example.com/'})
+
     def test_default_plan_is_read_only(self):
         r=self.exercise(args=[]);self.assertEqual(r['rc'],0,r['stderr'])
         self.assertEqual(r['site'],r['original']);self.assertEqual(r['backup_count'],0)

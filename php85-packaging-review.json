@@ -3,17 +3,18 @@
     "php85.sh"
   ],
   "files": {
-    "README-php85.md": "bddc86ab9ff9e91428b68857d277e01af7a3d973a3293739fc1e982ddb47926a",
+    "README-php85.md": "d65f97395ae4e43ad33bfb0e5ac53beb2532649cea240e699ad8fd34ea82180a",
     "build_php85_release.py": "8217a29000fb5f7ad3f3a61de19a63db39cdb8e1fa09dca9dc1addfe756a514b",
-    "php85-validation.json": "201800063c94db3428d5c9b8359640cf127a9241fc51bcf10a0155b6f81b148d",
-    "php85.sh": "0c5501e988e351a45cb2532ddb108a2473da1ae903073b38d088ac3bdda8be04",
-    "test_php85_shell.py": "0ae67de4c7e97083073eb91a06fd9be2ba9478fcb002eb4ee4ebe3ff42ec66ca",
-    "FLEET-UPGRADE-PLAN.md": "865fa021230eab0a3c3db58b478ec849a2ece1721117446514d8a705fff05f21"
+    "php85-validation.json": "db9239d48ec7ab6ffff05d58129e09d1340632113d82384cadd8dc2e8dd0f9a0",
+    "php85.sh": "1cbc2cdeaeca0c6b469c5c05142d4097bae21b77b41efe5a3515a78681852487",
+    "test_php85_shell.py": "91c9b1690b2cfbf28d808700376b7c3074b71959ab0b9e5ef8fd5a47da9795f6",
+    "FLEET-UPGRADE-PLAN.md": "cb7b5bdb2102521ca09787e1fdedf723f2e32a32c962c9e818ca76d65497e561",
+    "forge-php85-recipe.sh": "49a2cbfae57d54ca0064f05a6f16e7f526fd9a50a218ec58dae5d3532602ddaf"
   },
   "independent_source_review": "pending for local changes",
   "previous_Python_modules": "Historical references; not downloaded or executed by php85.sh",
   "production_execution": false,
   "profile": "Ubuntu 22.04/24.04; standard Nginx/direct Unix route; one www FPM pool",
-  "reviewed_source_sha256": "0c5501e988e351a45cb2532ddb108a2473da1ae903073b38d088ac3bdda8be04",
+  "reviewed_source_sha256": "1cbc2cdeaeca0c6b469c5c05142d4097bae21b77b41efe5a3515a78681852487",
   "version": "3.0.1-local-candidate"
 }
