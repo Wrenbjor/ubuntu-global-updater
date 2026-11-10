@@ -2,7 +2,7 @@
 
 `fleet_os_stage.py` is a separate backend interface and tested state machine for
 **22.04 → 24.04 → 26.04** after the PHP migration. It does not invoke the legacy
-installer, change its target, run commands, or provide a production backend.
+installer, change its target, run commands, or provide a complete production host adapter.
 Do not deploy this module as an OS-upgrade Forge recipe yet.
 
 The existing `install.sh` remains an **OS-first, 24.04-targeted** legacy workflow;
@@ -26,6 +26,24 @@ embedded release hashes remain unchanged and verify independently.
   and interrupted installs never automatically retry. Legacy/unknown checkpoints
   are not silently adopted or overwritten. Completed 24.04 is not completed 26.04.
 - A plan invocation does not save checkpoints or call the mutating backend.
+
+## Supported command backend
+
+`fleet_os_native.py` implements the actual native command boundary using Ubuntu’s
+public `do-release-upgrade`, without private DistUpgrade APIs. It verifies the
+installed entry point’s package ownership/integrity, requires the next expected
+LTS to be officially offered, rechecks plan/host drift, requires a retained worker,
+and wraps the native run plus PHP restoration in the host transaction guard.
+The mutating native child has no wall-clock timeout. It never requests a reboot
+or uses `-d`; the host must additionally verify the installed frontend’s no-reboot
+policy before executing.
+
+This backend **still requires a concrete host policy adapter** for real inventory,
+authenticated full native transaction preflight, target-suite PHP candidates,
+transaction guard, exact PHP restoration and service/application health checks.
+There is no usable unattended OS deployment recipe until those pieces and VM
+validation are complete. The backend is not permission to substitute supplied
+booleans for observed proof or run `do-release-upgrade` unguarded.
 
 ## Backend contract and remaining work
 
@@ -55,7 +73,7 @@ Required before connecting a Forge OS recipe:
 Run offline tests:
 
 ```sh
-python3 -m unittest -v test_fleet_os_stage.py
+python3 -m unittest -v test_fleet_os_stage.py test_fleet_os_native.py
 python3 verify_release.py
 ```
 
