@@ -66,3 +66,15 @@ reboot proof, old checkpoints, database holds and per-hop source restoration.
 Then disposable-VM PHP/Nginx migration and22.04→24.04→26.04 integration with
 real packages and application checks. Existing stored review approvals do not
 cover new changes. No live upgrade has been tested by this patch.
+
+## New OS lifecycle candidate
+
+`fleet_os_stage.py` now implements the separate PHP-first 22→24→26 lifecycle,
+mandatory per-hop same-suite PHP candidate contract and durable reboot/failure
+checkpoints. Eleven offline lifecycle tests cover both hops, exact-version and
+provenance gates, failed/interrupted states, legacy receipts, reboot acceptance,
+and checkpoint locking. See `README-fleet-os.md` for the backend contract.
+
+This is deliberately **not wired to production execution**: an authenticated
+per-hop package resolver and verified native adapter/VM integration remain
+required. The legacy installer and its embedded payload remain unchanged.
