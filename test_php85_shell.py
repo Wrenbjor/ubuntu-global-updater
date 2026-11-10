@@ -158,11 +158,13 @@ class BashFixtures(unittest.TestCase):
                         (available/(module+'.ini')).write_bytes(payload.read_bytes())
                         for sapi in ('cli','fpm'):
                             if branch=='7.4' and sapi=='cli' and module=='mysqli':continue
-                            if branch=='8.5' and scenario.get('missing_target_module') and module=='curl':continue
+                            if branch=='8.5' and (scenario.get('missing_target_module') or scenario.get('disabled_target_custom_module')) and module=='curl':continue
                             (config/('php/'+branch+'/'+sapi+'/conf.d/20-'+module+'.ini')).symlink_to('../../mods-available/'+module+'.ini')
                     if scenario.get('missing_target_module') and module=='curl':
                         (config/'php/8.5/mods-available/curl.ini').unlink()
                 manifest.write_text(''.join(entries))
+                if scenario.get('disabled_target_custom_module'):
+                    (config/'php/8.5/mods-available/curl.ini').write_text('extension=/private/custom/curl.so\n')
             if scenario.get('multipool'):
                 (config/'php/7.4/fpm/pool.d/extra.conf').write_text('[extra]\nuser=forge\ngroup=forge\nlisten=/run/php/customer.sock\n')
             (config/'php/7.4/fpm/php-fpm.conf').write_text('[global]\npid=/run/php/php7.4-fpm.pid\nprocess.max=99\ninclude='+str(config/'php/7.4/fpm/pool.d/*.conf')+'\n')

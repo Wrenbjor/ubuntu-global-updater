@@ -37,6 +37,12 @@ class IniGuardTests(unittest.TestCase):
         self.assertNotEqual(r['rc'],0)
         self.assertIn('target INI',r['stderr'])
         self.assertEqual(r['site'],r['original'])
+    def test_disabled_custom_target_module_is_not_enabled(self):
+        r=self.exercise({'module_states':True,'disabled_target_custom_module':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertIn('Customized/unverified target module configuration',r['stderr'])
+        self.assertEqual(r['site'],r['original'])
+        self.assertNotIn('20-curl.ini',r['module_links']['cli'])
     def test_failed_run_restores_cli_auto_mode(self):
         r=self.exercise({'bad_health':True})
         self.assertNotEqual(r['rc'],0)

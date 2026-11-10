@@ -354,6 +354,10 @@ for sapi in ('cli','fpm'):
         for name,path in enabled.items():
             if name in ('opcache','json'):continue # built into PHP 8.5
             if name not in target_available:stop('Enabled source module has no PHP 8.5 configuration: '+name+' ('+sapi+')')
+            module_file=target_available[name]
+            expected=baseline(module_file,'8.5')
+            if module_file.is_symlink() or not expected or directives(module_file)!=expected:
+                stop('Customized/unverified target module configuration requires reconciliation: '+str(module_file))
         for link in sorted((target/sapi/'conf.d').glob('*.ini')):
             if not link.is_symlink():continue
             resolved=link.resolve()
