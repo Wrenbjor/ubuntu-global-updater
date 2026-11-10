@@ -1,18 +1,20 @@
 {
-  "embedded_Python": false,
+  "embedded_Python": true,
   "errors": 0,
   "failures": 0,
-  "fixture_log_sha256": "6ceb234180bd458379f30eb2e16ec96b230f931dcc8c2a8c0780ab0e785ff76b",
-  "independent_Bash_source_review": "pending for dynamic fleet and rollback changes",
+  "fixture_log_sha256": "8d8e779f7f2efe0ee28cfb0526260a0c29ca8e22bfe14389346d8567c19f6abd",
+  "independent_Bash_source_review": "Independent targeted source review completed: identified INI/pool/target-loader and CLI rollback findings addressed through 7012eb3; no additional known critical blocker in reviewed scope. Not production-fleet/application certification.",
   "production_execution": false,
-  "reviewed_source_sha256": "edc6ba3916f94171ebc85757049e09d5dda99acab9b8260896e079c6ac563b1d",
+  "reviewed_source_sha256": "d1222cb33c7e9ccf05463118e1bc65c9238ce31de2a7b16edc9626d8f35a03da",
   "shell_syntax": true,
   "skips": 0,
-  "test_scope": "26 mocked shell/fleet fixtures, explicit mocked socket-file mode; no apt/systemd/Nginx/PHP integration or live server execution. Real socket checks untested.",
-  "tests": 26,
+  "test_scope": "66 focused offline tests: 48 PHP/Nginx fixtures with explicit mocked socket-file mode, 18 OS lifecycle/native-command contract fixtures. No real apt/systemd/Nginx/PHP integration, Unix socket validation, VM upgrade or production execution.",
+  "tests": 66,
   "version": "3.1.0-local-candidate",
   "whole_download_guard": true,
   "recipe_shell_syntax": true,
   "recipe_nonroot_refusal": true,
-  "OS_bundle_static_verification": true
+  "OS_bundle_static_verification": true,
+  "OS_production_backend_complete": false,
+  "production_ready": false
 }

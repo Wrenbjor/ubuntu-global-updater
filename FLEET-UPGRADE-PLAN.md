@@ -1,80 +1,63 @@
-# Two-phase fleet upgrade: implementation status
+# Two-phase fleet upgrade: integration candidate
 
-Requested: one Forge-deployable updater that dynamically migrates each eligible
-Ubuntu22.04 host to exactly PHP8.5.12, then separately upgrades the OS to26.04.
-Forge metadata synchronization is secondary. No production execution performed.
+Goal: deploy one pinned Forge recipe across eligible Ubuntu 22.04 hosts, migrate
+PHP to exactly **8.5.12**, then run a separate **22.04 → 24.04 → 26.04** OS phase.
+Forge metadata synchronization is secondary. No production hosts were changed.
 
-## Current candidate
+## PHP implementation
 
-Local patch selects exact8.5.12 core packages and verifies exact CLI/FPM versions.
-The existing Bash runner is intentionally not presented as fleet-complete: it
-supports same-branch multiple/custom pools with literal local Unix sockets. Health probes are now application-neutral HTTPS
-homepage checks; a commit/checksum-pinned Forge recipe template is included.
+- Exact core package selection and exact CLI/FPM runtime-version checks.
+- Same-source-branch multiple FPM pools and custom local Unix sockets; source
+  global configuration and pool identities preserved with target paths.
+- Include-aware Nginx health discovery associates PHP routes with server blocks,
+  configured HTTP/TLS listeners, local addresses, ports and literal hostnames.
+- Atomic route cutover, guarded configuration/CLI rollback, concurrent-edit
+  preservation and durable failed/interrupted checkpoints. Packages themselves
+  are not rolled back. Incomplete rollback blocks retries rather than guessing.
+- Download-first, commit/SHA256-pinned Forge recipe template, default plan-only.
 
-## PHP phase still required
+The candidate is not fleet-certified. Mixed active PHP branches, nested/external
+FPM includes, nonliteral/inline/multiline Nginx routes and health listeners that
+cannot be safely probed stop rather than partially migrating. Homepage responses
+are smoke checks, not evidence that an application executed PHP. Queue workers,
+schedulers, hardcoded PHP paths and Forge metadata need separate verification.
 
-- Discover effective Nginx routes and FPM pools, including included route files,
-  custom sockets and multiple pools. Associate host/health probes with server
-  blocks rather than filenames. Refuse only genuinely ambiguous layouts.
-- Preserve source global FPM configuration, custom INI settings, enabled/disabled
-  modules and pool identities; adapt PID/include/socket paths for the target.
-- Existing source binary may be absent; distinguish stale configurations from
-  actual active routes, not CLI version or a filename convention.
-- Do not assume repository filename; validate actual enabled same-suite packages.
-- Implemented: snapshot route/CLI state and restore on cutover or health failure;
-  preserve old runtime. Restore post-APT target configuration if no concurrent
-  edits occurred. Package installation rollback remains a separate concern.
-  Interrupted/incomplete rollback blocks retries with a durable checkpoint;
-  fully automatic resume is not implemented.
-- Broader application health checks, runtime module verification, explicit
-  per-host result/status, resumable interrupted-state handling, and rerun tests.
-- Publish a reviewed commit and fill its SHA/hash into the included download-first
-  Forge recipe only after the required validation passes.
+Independent review found silent INI/module loss and unsafe custom-target reuse
+in the earlier candidate. Targeted fail-closed source/target configuration guards, runtime module checks
+and custom-target rejection are now integrated;
+passing mocked fixtures alone is not proof of full application compatibility.
+See README-php85.md and the current validation report for scope and remaining
+configuration/module limitations. Do not use the recipe placeholders as a
+published deployment pin.
 
-## OS phase still required
+## OS implementation and remaining blocker
 
-Supported Ubuntu path:22.04→24.04→26.04, with a reboot/checkpoint per hop.
-Canonical enabled24.04→26.04.1 on September29,2026.
+`fleet_os_stage.py` implements the separate PHP-first lifecycle, exact-version
+and same-suite package contracts, durable failure/reboot checkpoints, one hop
+per invocation and no automatic reboot. `fleet_os_native.py` implements the
+public `do-release-upgrade` command boundary without development-release flags.
+The legacy `install.sh` remains unchanged, OS-first and targeted at 24.04; it is
+**not** the new second phase.
+
+**The new OS phase is not a usable production recipe yet.** A concrete host
+policy adapter must provide authenticated target-suite package resolution,
+native transaction protection, database-major preservation, exact PHP restore
+and actual runtime/application verification. A command boundary and fixture
+backend do not provide these guarantees. Do not run an unguarded release upgrade
+as a substitute. See README-fleet-os.md.
+
+Ubuntu supports sequential 22.04 → 24.04 → 26.04, with a reboot/checkpoint per
+hop. Canonical enabled the 24.04 → 26.04.1 upgrade on September 29, 2026.
 
 Sources:
 - https://documentation.ubuntu.com/release-notes/26.04/
 - https://lists.ubuntu.com/archives/ubuntu-announce/2026-September/000328.html
 - https://ubuntu.com/server/docs/how-to/software/upgrade-your-release/
 
-The current OS coordinator always runs PHP/Node/package maintenance after its
-24.04 target. Add an explicit OS-only phase rather than just changing TARGET.
-Update ubuntu_global_os.py HOPS, ubuntu_global.py target gates, php_repository.py
-suite mapping, and the embedded installer/release manifest together. Preserve
-existing failed/interrupted checkpoints; completed24.04 is not completed26.04.
+## Before any fleet-ready claim
 
-The current defer_php guard freezes existing PHP packages. Jammy PHP8.5 packages
-may depend on libraries unavailable after the next OS hop. Define and test
-same-branch, same-suite PHP preservation/rebuild for each hop; don't waive the
-guard without a replacement. Preserve database-major compatibility holds.
-
-Verify the private DistUpgradeController/MyCache/SafeProgress adapter against
-the actual authenticated Resolute upgrader. Existing APIs may have changed.
-Regenerate install.sh's21 embedded modules and matching hashes only after
-source changes pass. Most historical OS test modules named in validation.json
-are not present in this checkout.
-
-## Required validation before fleet-ready claim
-
-Fixtures for multi-pool routing, missing old binary, customized globals, package
-absence, exact target, failure rollback, rerun/drift,22/24/26 sequential plans,
-reboot proof, old checkpoints, database holds and per-hop source restoration.
-Then disposable-VM PHP/Nginx migration and22.04→24.04→26.04 integration with
-real packages and application checks. Existing stored review approvals do not
-cover new changes. No live upgrade has been tested by this patch.
-
-## New OS lifecycle candidate
-
-`fleet_os_stage.py` now implements the separate PHP-first 22→24→26 lifecycle,
-mandatory per-hop same-suite PHP candidate contract and durable reboot/failure
-checkpoints. Eleven offline lifecycle tests cover both hops, exact-version and
-provenance gates, failed/interrupted states, legacy receipts, reboot acceptance,
-and checkpoint locking. See `README-fleet-os.md` for the backend contract.
-
-This is deliberately **not wired to production execution**: an authenticated
-per-hop package resolver and verified native adapter/VM integration remain
-required. The legacy installer and its embedded payload remain unchanged.
+Run disposable-VM PHP/Nginx migrations with real sockets/packages and custom
+configuration/module cases, failures and reruns. Then validate the complete
+22.04 → 24.04 → 26.04 path with a real guarded backend, package provenance,
+database holds, reboot proof and application checks. Historical stored approvals
+and legacy installer hash verification do not approve these new changes.

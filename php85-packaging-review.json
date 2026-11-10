@@ -3,19 +3,23 @@
     "php85.sh"
   ],
   "files": {
-    "README-php85.md": "d4a9ca0e31c0457aa1821f4319a2770d1507825942e2b5c8f002fe809b1464e4",
-    "build_php85_release.py": "8217a29000fb5f7ad3f3a61de19a63db39cdb8e1fa09dca9dc1addfe756a514b",
-    "php85-validation.json": "820bc43734ba009b39e5fbc7defd68fd05f7e2f5f894e3fa82c0b14bf9ba836f",
-    "php85.sh": "edc6ba3916f94171ebc85757049e09d5dda99acab9b8260896e079c6ac563b1d",
-    "test_php85_shell.py": "c9a421666a2f795bfb3b2db6b46aeeee4528d357fd8c5bc5e0ba3fd831c17ec7",
-    "FLEET-UPGRADE-PLAN.md": "92b814560487cd1fe50037f88ea8379a239fdd43707d5ff0fccf91a857dc788e",
+    "FLEET-UPGRADE-PLAN.md": "f40915175fdfd102fe44363c7a3d629a083efe8c1364bc39d626bcb6bcb58a99",
+    "README-php85.md": "1a2a922ec26f5c26e273c7c44c97813d7c4b624ee0db808481b75b15ed6b0c02",
+    "build_php85_release.py": "ab536e5cdef8ced87e2b7bff8ab78cffbd2c00518b5b887fe0ce03c87703ad9e",
     "forge-php85-recipe.sh": "49a2cbfae57d54ca0064f05a6f16e7f526fd9a50a218ec58dae5d3532602ddaf",
-    "test_php85_fleet.py": "f971e85bbe2eef41877643ef461a0b87f313494e91388851688a3400e17dfab9"
+    "nginx_health_discovery.py": "8e27ba18bb546e65369e63d598bfd14eb7077911ad5f69816e4df9f3cc2dd734",
+    "php85-validation.json": "ae482120b96292f6854c6222cc972eea022898fcc75b0f0f431a9d90d97376f0",
+    "php85.sh": "d1222cb33c7e9ccf05463118e1bc65c9238ce31de2a7b16edc9626d8f35a03da",
+    "test_nginx_health_discovery.py": "85907f57d3cbb67fce32b232782e84d04afa9856c6d66344e7376958b05095be",
+    "test_php85_fleet.py": "f971e85bbe2eef41877643ef461a0b87f313494e91388851688a3400e17dfab9",
+    "test_php85_ini_guard.py": "f55b5f6b75a8e22a666717c2055113fddd6c853c1f4065510cbfd3d708a2bc16",
+    "test_php85_shell.py": "b067904d7f148337bd426aa7a6875728da78579dc7489cec0a54ac462e92e3ca"
   },
-  "independent_source_review": "pending for dynamic fleet and rollback changes",
+  "independent_source_review": "Independent targeted source review completed: identified INI/pool/target-loader and CLI rollback findings addressed through 7012eb3; no additional known critical blocker in reviewed scope. Not production-fleet/application certification.",
   "previous_Python_modules": "Historical references; not downloaded or executed by php85.sh",
   "production_execution": false,
-  "profile": "Ubuntu 22.04/24.04; same-branch multiple FPM pools; direct local Unix routes; hostname in route file",
-  "reviewed_source_sha256": "edc6ba3916f94171ebc85757049e09d5dda99acab9b8260896e079c6ac563b1d",
-  "version": "3.1.0-local-candidate"
+  "profile": "Ubuntu 22.04/24.04; same-source-branch multiple FPM pools; standalone literal Unix routes; include-aware HTTP/TLS listener health; strict configuration guards",
+  "reviewed_source_sha256": "d1222cb33c7e9ccf05463118e1bc65c9238ce31de2a7b16edc9626d8f35a03da",
+  "version": "3.1.0-local-candidate",
+  "production_ready": false
 }

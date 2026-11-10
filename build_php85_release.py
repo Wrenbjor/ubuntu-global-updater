@@ -1,4 +1,4 @@
-"""Legacy v2 render helpers retained for reference; main only checks the current standalone Bash."""
+"""Legacy v2 render helpers retained for reference; main only checks the current standalone shell entrypoint."""
 import argparse
 import base64
 import gzip
@@ -62,7 +62,7 @@ php85_main "$@" '__SENTINEL__' '''
 
 
 def main():
-    parser = argparse.ArgumentParser(description='php85.sh is standalone Bash; no build is required.')
+    parser = argparse.ArgumentParser(description='php85.sh embeds its helpers; no build is required.')
     parser.add_argument('--check', action='store_true')
     parser.parse_args()
     subprocess.run(['bash', '-n', str(ROOT / 'php85.sh')], check=True)
