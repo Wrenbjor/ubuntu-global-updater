@@ -251,6 +251,134 @@ if [[ -f $old_global ]]; then
         [[ $include == "/etc/php/$source/fpm/pool.d/*.conf" || $include == "$config_root/php/$source/fpm/pool.d/*.conf" ]] || die "External FPM include requires review: $include"
     done < <(awk -F= '/^[[:space:]]*include[[:space:]]*=/{sub(/[;#].*/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);print $2}' "$old_global")
 fi
+# Validate every active directive before dropping anything from the migration.
+# Generated Debian module files are compared with authenticated installed package
+# payloads recorded by dpkg, not trusted merely because they have familiar names.
+php_ini_guard() {
+python3 -I -B - "$config_root" "$source" "$1" <<'PHP85_INI_GUARD'
+import hashlib, pathlib, re, subprocess, sys
+root=pathlib.Path(sys.argv[1]); branch=sys.argv[2]; mode=sys.argv[3]
+prefix=root.parent
+base=root/'php'/branch; target=root/'php/8.5'
+allowed=re.compile(r'^(memory_limit|max_execution_time|max_input_time|max_input_vars|post_max_size|upload_max_filesize|date\.timezone|disable_functions|expose_php|display_errors|display_startup_errors|log_errors|error_reporting|error_log|allow_url_fopen|allow_url_include|open_basedir|auto_prepend_file|auto_append_file|default_socket_timeout|session\.(save_handler|save_path|serialize_handler|gc_.*|cookie_.*|use_.*)|mysqli\.default_socket|pdo_mysql\.default_socket|opcache\.(enable|memory_consumption|max_accelerated_files|validate_timestamps|revalidate_freq))$')
+def stop(message): raise SystemExit('STOP: '+message)
+def directives(path):
+    values={}
+    for line in path.read_text().splitlines():
+        line=line.strip()
+        if not line or line.startswith((';','#')): continue
+        if line.startswith('['):
+            if '=' in line: stop('Per-directory INI section requires migration review: '+str(path))
+            continue
+        if '=' not in line: stop('Unrecognized INI syntax: '+str(path))
+        key,value=line.split('=',1);key=key.strip()
+        # Keep exact normalized value rather than stripping quoted comment delimiters.
+        values.setdefault(key,[]).append(value.strip())
+    return values
+payloads={}
+for manifest in (prefix/'var/lib/dpkg/info').glob('php*-*.md5sums'):
+    package_branch=re.match(r'php(\d+\.\d+)-',manifest.name)
+    if not package_branch or package_branch[1] not in (branch,'8.5'):continue
+    package_branch=package_branch[1]
+    if manifest.is_symlink(): stop('Unsafe package checksum manifest')
+    for line in manifest.read_text().splitlines():
+        fields=line.split(None,1)
+        if len(fields)!=2: continue
+        digest,name=fields; path=prefix/name.lstrip('/')
+        if path.name.endswith('.ini') or path.name=='php.ini-production':
+            if path.is_file() and not path.is_symlink() and hashlib.md5(path.read_bytes()).hexdigest()==digest:
+                payloads.setdefault((package_branch,path.name),[]).append(path)
+def baseline(path,version=branch):
+    name='php.ini-production' if path.name=='php.ini' else path.name
+    choices=payloads.get((version,name),[])
+    if not choices:return {}
+    parsed=[directives(p) for p in choices]
+    if any(p!=parsed[0] for p in parsed):stop('Ambiguous package baseline for '+str(path))
+    return parsed[0]
+for pool in (base/'fpm/pool.d').glob('*.conf'):
+    for line in pool.read_text().splitlines():
+        match=re.match(r'\s*php_(?:admin_)?(?:value|flag)\[([^]]+)\]\s*=',line)
+        if match and not allowed.fullmatch(match[1]):
+            stop('Unsupported pool PHP override '+match[1]+' in '+str(pool))
+if mode=='migrate':
+    # APT may preserve pre-existing target files with --force-confold. Never let
+    # an unreviewed target loader or later-sorted custom overlay silently win.
+    for sapi in ('cli','fpm'):
+        for path in [target/sapi/'php.ini',*sorted((target/sapi/'conf.d').glob('*.ini'))]:
+            if not path.is_file():stop('Missing target INI configuration: '+str(path))
+            if path.parent.name=='conf.d' and not path.is_symlink():stop('Unmanaged target INI file requires reconciliation: '+str(path))
+            if path.is_symlink() and path.resolve().parent != (target/'mods-available').resolve():
+                stop('External target INI symlink: '+str(path))
+            default=baseline(path.resolve(),'8.5')
+            if not default or directives(path)!=default:
+                stop('Customized/unverified target INI configuration requires reconciliation: '+str(path))
+available={p.stem:p for p in (base/'mods-available').glob('*.ini')}
+for sapi in ('cli','fpm'):
+    folder=base/sapi
+    enabled={}
+    for path in sorted((folder/'conf.d').glob('*.ini')):
+        if path.is_symlink():
+            resolved=path.resolve()
+            if resolved.parent != (base/'mods-available').resolve():stop('External INI symlink requires review: '+str(path))
+            name=resolved.stem
+            if name in enabled:stop('Duplicate module INI for '+name+' in '+sapi)
+            enabled[name]=path
+    for path in [folder/'php.ini',*sorted((folder/'conf.d').glob('*.ini'))]:
+        if not path.is_file():stop('Missing/broken INI file: '+str(path))
+        actual=directives(path); default=baseline(path.resolve())
+        for key,values in actual.items():
+            if allowed.fullmatch(key):continue
+            if key in ('session.sid_length','session.sid_bits_per_character'):continue # removed in PHP 8.4
+            if key=='extension_dir':stop('Old PHP extension_dir requires migration review: '+str(path))
+            if key in ('extension','zend_extension'):
+                if not path.is_symlink() or values != default.get(key):
+                    stop('Custom/unverified extension loader requires migration review: '+str(path))
+            elif values != default.get(key):
+                stop('Unsupported custom INI directive '+key+' in '+str(path))
+    if mode=='runtime':
+        binary='php8.5' if sapi=='cli' else 'php-fpm8.5'
+        result=subprocess.run([binary,'-m'],capture_output=True,text=True)
+        if result.returncode or re.search(r'Unable to load|Failed loading|PHP (Fatal error|Parse error)',result.stderr,re.I):
+            stop('Target '+sapi+' module startup failed: '+result.stderr.strip())
+        loaded={line.strip().lower() for line in result.stdout.splitlines()}
+        for name,path in enabled.items():
+            if name in ('opcache','json'):continue
+            values=directives(path)
+            for key in ('extension','zend_extension'):
+                for value in values.get(key,[]):
+                    module=value.split(';',1)[0].strip().strip('"\'')
+                    module=pathlib.Path(module).name.removesuffix('.so').lower()
+                    if module not in loaded:stop('Target '+sapi+' did not load source module '+module)
+    if mode=='migrate':
+        target_available={p.stem:p for p in (target/'mods-available').glob('*.ini')}
+        for name,path in enabled.items():
+            if name in ('opcache','json'):continue # built into PHP 8.5
+            if name not in target_available:stop('Enabled source module has no PHP 8.5 configuration: '+name+' ('+sapi+')')
+        for link in sorted((target/sapi/'conf.d').glob('*.ini')):
+            if not link.is_symlink():continue
+            resolved=link.resolve()
+            if resolved.parent != (target/'mods-available').resolve():stop('External target module symlink: '+str(link))
+            name=resolved.stem
+            if name in ('opcache','json'):continue
+            if name not in enabled:link.unlink()
+        for name,path in enabled.items():
+            if name in ('opcache','json'):continue
+            links=[p for p in (target/sapi/'conf.d').glob('*.ini') if p.is_symlink() and p.resolve()==target_available[name].resolve()]
+            if not links:
+                dest=target/sapi/'conf.d'/path.name
+                if dest.exists() or dest.is_symlink():stop('Target module link collision: '+str(dest))
+                dest.symlink_to('../../mods-available/'+name+'.ini')
+PHP85_INI_GUARD
+}
+if [[ $source != 8.5 ]]; then php_ini_guard check; fi
+if [[ $source != 8.5 && -f $new_pool ]]; then
+    template=$(dpkg-query -L php8.5-fpm | awk '/^\/usr\/share\/.*\/www.conf$/{print}')
+    checksum=$(dpkg-query -W -f='${Conffiles}' php8.5-fpm | awk -v p="$new_pool" '$1==p && NF==2{print $2}')
+    if ! { [[ -n $template && -f $template ]] && cmp -s "$new_pool" "$template"; } &&
+       ! { [[ -n $checksum ]] && [[ $(md5sum "$new_pool" | awk '{print $1}') == "$checksum" ]]; }; then
+        die 'Existing customized PHP 8.5 pool requires explicit reconciliation; identity/socket equality is insufficient'
+    fi
+fi
 table=$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n')
 mapfile -t packages < <({
     printf 'php8.5-cli\nphp8.5-fpm\nphp8.5-common\n'
@@ -284,6 +412,7 @@ target_written=0
 routes_changed=()
 cli_before=$(update-alternatives --query php 2>/dev/null | awk '/^Value: /{print $2}' || true)
 update-alternatives --query php >"$backup/cli-before.txt" 2>&1 || true
+cli_mode_before=$(awk '/^Status: /{print $2}' "$backup/cli-before.txt")
 restore_timers() {
     if ((${#timers[@]})); then
         local pending=("${timers[@]}"); timers=()
@@ -331,6 +460,15 @@ cleanup() {
         fi
         if [[ -n $cli_before && -x $cli_before ]]; then
             update-alternatives --set php "$cli_before" >>"$backup/services.log" 2>&1 || rollback_ok=0
+            if [[ $cli_mode_before == auto ]]; then
+                cli_best=$(update-alternatives --query php 2>/dev/null | awk '/^Best: /{print $2}')
+                if [[ $cli_best == "$cli_before" ]]; then
+                    update-alternatives --auto php >>"$backup/services.log" 2>&1 || rollback_ok=0
+                else
+                    echo 'ROLLBACK INCOMPLETE: CLI path restored manually, but auto mode would select a different PHP binary after package changes' >&2
+                    rollback_ok=0
+                fi
+            fi
         fi
     fi
     restore_timers || { rollback_ok=0; rc=1; }
@@ -429,6 +567,7 @@ if [[ $source != 8.5 ]]; then
             sed -i "s@/php/$source/@/php/8.5/@g;s@php$source-fpm@php8.5-fpm@g" "$config_root/php/8.5/fpm/php-fpm.conf"
             sed -i -E 's@^([[:space:]]*pid[[:space:]]*=).*@\1 /run/php/php8.5-fpm.pid@' "$config_root/php/8.5/fpm/php-fpm.conf"
         fi
+        php_ini_guard migrate
         # Copy only application/settings directives, not old extension loaders or deprecated SID knobs.
         for sapi in fpm cli; do
             n=0
@@ -441,16 +580,14 @@ if [[ $source != 8.5 ]]; then
             done
         done
     else
-        [[ ${#source_pools[@]} -eq 1 && ${source_pools[0]} == "$old_pool" ]] || die 'Existing custom PHP 8.5 pool conflicts with multi-pool migration'
-        old_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$old_pool")
-        new_identity=$(awk -F= '/^[[:space:]]*(user|group)[[:space:]]*=/{gsub(/[[:space:]]/,"",$0);print}' "$new_pool")
-        [[ $new_identity == "$old_identity" ]] && grep -qE '^[[:space:]]*listen[[:space:]]*=[[:space:]]*/(var/)?run/php/php8\.5-fpm\.sock[[:space:]]*$' "$new_pool" || die 'Existing PHP 8.5 pool differs; inspect its user/group/socket before overwriting it'
+        die 'PHP 8.5 pool changed after preflight; refusing custom target reuse'
     fi
 fi
 if [[ $target_changed == 1 ]]; then
     cp -a -- "$config_root/php/8.5" "$backup/target-written"
     target_written=1
 fi
+[[ $source == 8.5 ]] || php_ini_guard runtime
 php-fpm8.5 -t >>"$backup/services.log" 2>&1
 systemctl enable php8.5-fpm >>"$backup/services.log" 2>&1
 systemctl restart php8.5-fpm >>"$backup/services.log" 2>&1

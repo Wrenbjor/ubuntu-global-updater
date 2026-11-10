@@ -71,10 +71,13 @@ if name=='systemctl':
         state.write_text(json.dumps(data))
     done('')
 if name=='update-alternatives':
-    if '--query' in args:done('Name: php\nStatus: auto\nValue: '+str(root/'bin/php8.5')+'\n')
+    if '--query' in args:done('Name: php\nStatus: auto\nValue: '+str(root/'bin/php8.5')+'\nBest: '+str(root/('bin/php' if scenario.get('auto_best_changed') else 'bin/php8.5'))+'\n')
     done('')
-if name in ('php','php8.5'):done('CLI PHP 8.5.12')
+if name in ('php','php8.5'):
+    if '-m' in args:done('curl' if not scenario.get('runtime_missing_module') else '')
+    done('CLI PHP 8.5.12')
 if name=='php-fpm8.5':
+    if '-m' in args:done('curl\nmysqli' if not scenario.get('runtime_missing_module') else '')
     if '-t' in args and scenario.get('deprecation'):print('PHP Deprecated: fixture warning',file=sys.stderr)
     if '-t' in args and scenario.get('bad_fpm'):done('',1)
     done('PHP '+scenario.get('runtime_version','8.5.12')+' (fpm-fcgi)' if '-v' in args else '')
@@ -122,12 +125,44 @@ class BashFixtures(unittest.TestCase):
             source_pool='[www]\nuser=forge\ngroup=forge\nlisten=/run/php/php7.4-fpm.sock\npm.max_children=8\nenv[FIXTURE_TOKEN]=fixture-private\n'
             stock='[www]\nuser=www-data\ngroup=www-data\nlisten=/run/php/php8.5-fpm.sock\n'
             ready='[www]\nuser=forge\ngroup=forge\nlisten=/run/php/php8.5-fpm.sock\npm.max_children=99\n'
-            for phpbranch,pool in (('7.4',source_pool),('8.5',stock if scenario.get('stock') else ready)):
+            for phpbranch,pool in (('7.4',source_pool),('8.5',ready if scenario.get('custom_target') else stock)):
                 if scenario.get('bad_source') and phpbranch=='7.4':pool=pool.replace('php7.4-fpm.sock','other.sock')
                 p=config/('php/'+phpbranch+'/fpm/pool.d/www.conf');p.parent.mkdir(parents=True);p.write_text(pool);p.chmod(0o640)
                 for sapi in ('cli','fpm'):
                     folder=config/('php/'+phpbranch+'/'+sapi);(folder/'conf.d').mkdir(parents=True,exist_ok=True)
-                    (folder/'php.ini').write_text('memory_limit=512M\nextension=fixture.so\nsession.sid_length=26\n')
+                    (folder/'php.ini').write_text('memory_limit=512M\nsession.sid_length=26\n'+(scenario.get('custom_ini','') if phpbranch=='7.4' else ''))
+            import hashlib
+            target_payload=root/'usr/lib/php/8.5/php.ini-production';target_payload.parent.mkdir(parents=True)
+            target_payload.write_text('memory_limit=512M\nsession.sid_length=26\n')
+            target_manifest=root/'var/lib/dpkg/info/php8.5-common.md5sums';target_manifest.parent.mkdir(parents=True,exist_ok=True)
+            target_manifest.write_text(hashlib.md5(target_payload.read_bytes()).hexdigest()+'  '+str(target_payload.relative_to(root))+'\n')
+            if scenario.get('custom_target_ini'):
+                (config/'php/8.5/fpm/conf.d/99-zzz.ini').write_text('extension=custom.so\n')
+            if scenario.get('pool_override'):
+                with (config/'php/7.4/fpm/pool.d/www.conf').open('a') as f:f.write(scenario['pool_override'])
+            if scenario.get('module_states'):
+                import hashlib
+                manifest=root/'var/lib/dpkg/info/php7.4-common.md5sums';manifest.parent.mkdir(parents=True,exist_ok=True)
+                production=root/'usr/lib/php/7.4/php.ini-production';production.parent.mkdir(parents=True)
+                production.write_text('precision=14\n')
+                entries=[hashlib.md5(production.read_bytes()).hexdigest()+'  '+str(production.relative_to(root))+'\n']
+                for module in ('curl','mysqli'):
+                    payload=root/('usr/share/php7.4-'+module+'/'+module+'.ini');payload.parent.mkdir(parents=True)
+                    payload.write_text('extension='+module+'.so\n')
+                    entries.append(hashlib.md5(payload.read_bytes()).hexdigest()+'  '+str(payload.relative_to(root))+'\n')
+                    target_module=root/('usr/share/php8.5-'+module+'/'+module+'.ini');target_module.parent.mkdir(parents=True)
+                    target_module.write_bytes(payload.read_bytes())
+                    with target_manifest.open('a') as f:f.write(hashlib.md5(target_module.read_bytes()).hexdigest()+'  '+str(target_module.relative_to(root))+'\n')
+                    for branch in ('7.4','8.5'):
+                        available=config/('php/'+branch+'/mods-available');available.mkdir(exist_ok=True)
+                        (available/(module+'.ini')).write_bytes(payload.read_bytes())
+                        for sapi in ('cli','fpm'):
+                            if branch=='7.4' and sapi=='cli' and module=='mysqli':continue
+                            if branch=='8.5' and scenario.get('missing_target_module') and module=='curl':continue
+                            (config/('php/'+branch+'/'+sapi+'/conf.d/20-'+module+'.ini')).symlink_to('../../mods-available/'+module+'.ini')
+                    if scenario.get('missing_target_module') and module=='curl':
+                        (config/'php/8.5/mods-available/curl.ini').unlink()
+                manifest.write_text(''.join(entries))
             if scenario.get('multipool'):
                 (config/'php/7.4/fpm/pool.d/extra.conf').write_text('[extra]\nuser=forge\ngroup=forge\nlisten=/run/php/customer.sock\n')
             (config/'php/7.4/fpm/php-fpm.conf').write_text('[global]\npid=/run/php/php7.4-fpm.pid\nprocess.max=99\ninclude='+str(config/'php/7.4/fpm/pool.d/*.conf')+'\n')
@@ -168,7 +203,7 @@ class BashFixtures(unittest.TestCase):
             overlays={sapi:[p.read_text() for p in (config/('php/8.5/'+sapi+'/conf.d')).glob('99-legacy-*')] for sapi in ('cli','fpm')}
             return dict(rc=result.returncode,stdout=result.stdout.decode(),stderr=result.stderr.decode(),calls=calls,
                 shared=(config/'nginx/php-shared.conf').read_text() if (config/'nginx/php-shared.conf').exists() else '',checkpoint=(home/'php85-active-run').exists(),site=site.read_text(),original=text,symlink=enabled.is_symlink(),backup=saved,backup_count=len(backups),
-                global_config=(config/'php/8.5/fpm/php-fpm.conf').read_text() if (config/'php/8.5/fpm/php-fpm.conf').exists() else '',extra_target=(config/'php/8.5/fpm/pool.d/extra.conf').read_text() if (config/'php/8.5/fpm/pool.d/extra.conf').exists() else '',target=target.read_text(),target_mode=target.stat().st_mode&0o777,ready=ready,overlays=overlays,old=old.read_bytes())
+                global_config=(config/'php/8.5/fpm/php-fpm.conf').read_text() if (config/'php/8.5/fpm/php-fpm.conf').exists() else '',extra_target=(config/'php/8.5/fpm/pool.d/extra.conf').read_text() if (config/'php/8.5/fpm/pool.d/extra.conf').exists() else '',module_links={sapi:sorted(p.name for p in (config/('php/8.5/'+sapi+'/conf.d')).glob('*.ini') if p.is_symlink()) for sapi in ('cli','fpm')},target=target.read_text(),target_mode=target.stat().st_mode&0o777,ready=ready,overlays=overlays,old=old.read_bytes())
 
     def test_exact_target_is_pinned(self):
         r=self.exercise({'candidate_version':'8.5.13-1+ubuntu22.04.1+deb.sury.org+1'});self.assertEqual(r['rc'],0,r['stderr'])
@@ -206,11 +241,11 @@ class BashFixtures(unittest.TestCase):
         self.assertEqual(r['site'],r['original']);self.assertEqual(r['backup_count'],0)
         self.assertFalse(any(c[0] in ('apt-get','add-apt-repository','systemctl','update-alternatives') for c in r['calls']))
 
-    def test_ready85_reuses_pool_old_CLI85_and_preserves_route_symlink_and_backup(self):
-        r=self.exercise(args=['--apply','--adopt-vendor-socket']);self.assertEqual(r['rc'],0,r['stderr'])
-        self.assertEqual(r['target'],r['ready']);self.assertEqual(r['overlays'],{'cli':[],'fpm':[]})
-        self.assertTrue(r['symlink']);self.assertIn('php8.5-fpm.sock',r['site']);self.assertEqual(r['backup'],r['original'].encode())
-        self.assertIn('COMPLETE',r['stdout']);self.assertEqual(r['old'],b'old failed evidence\n')
+    def test_custom_target_pool_is_not_silently_reused(self):
+        r=self.exercise({'custom_target':True});self.assertNotEqual(r['rc'],0)
+        self.assertIn('Existing customized PHP 8.5 pool',r['stderr'])
+        self.assertEqual(r['site'],r['original'])
+        self.assertFalse(any(c[0]=='apt-get' for c in r['calls']))
 
     def test_stock_pool_copies_source_settings_permissions_without_old_loaders(self):
         r=self.exercise({'stock':True});self.assertEqual(r['rc'],0,r['stderr'])
