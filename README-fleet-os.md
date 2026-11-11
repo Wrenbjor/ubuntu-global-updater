@@ -25,6 +25,14 @@ embedded release hashes remain unchanged and verify independently.
 - Private locked/fsynced checkpoints record `installing` before mutation. Failures
   and interrupted installs never automatically retry. Legacy/unknown checkpoints
   are not silently adopted or overwritten. Completed 24.04 is not completed 26.04.
+- Schema-2 checkpoints retain the full prepared package plan and its digest.
+  After restoration and at every checkpoint inspection, the observed installed
+  PHP package names and exact Debian versions must equal that plan, including
+  independent extensions. Missing or changed receipts and schema-1 checkpoints
+  hold for review rather than being adopted.
+- Accepted checkpoints require fresh application/service/kernel health evidence
+  before another hop or completion. A later boot requires a separate acceptance
+  invocation even when a previous boot was already accepted.
 - A plan invocation does not save checkpoints or call the mutating backend.
 
 ## Supported command backend
@@ -51,7 +59,9 @@ A host adapter must implement `snapshot()`, read-only `prepare(decision)`,
 `upgrade(decision, prepared)` and read-only `verify(state)`. Evidence must come from
 actual host/package observations, not supplied booleans or a saved approval file.
 The target package candidate plan is bound to the initial snapshot and persisted
-by hash. `upgrade` must enforce that exact plan during **every** apt transaction,
+in full together with its hash. Post-hop and subsequent snapshots must include
+`php.installed_packages` and `php.installed_package_versions` (package name to
+exact Debian version); both must match the receipt exactly. `upgrade` must enforce that exact plan during **every** apt transaction,
 not simply rely on a preflight that can drift.
 
 Required before connecting a Forge OS recipe:

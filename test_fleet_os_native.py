@@ -1,7 +1,13 @@
 import contextlib
 import copy
+import os
+from pathlib import Path
+import stat
+import subprocess
+import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import fleet_os_native as native
 import fleet_os_stage as stage
@@ -127,6 +133,109 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(native.offered_release("New release '" + value + "' available."), '24.04')
         with self.assertRaises(stage.Hold):
             native.offered_release('No new release found.')
+
+
+class CommandBoundaryTests(unittest.TestCase):
+    def test_private_log_and_nonzero_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'native.log'
+            child = Mock()
+            child.wait.return_value = 1
+            with patch.object(native.subprocess, 'Popen', return_value=child) as launch:
+                with self.assertRaisesRegex(stage.Hold, 'preserve_no_retry'):
+                    native.Commands(log).run_upgrade(['fixture-upgrader'])
+            self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+            self.assertEqual(launch.call_count, 1)
+            child.wait.assert_called_once_with()
+            child.kill.assert_not_called()
+            child.terminate.assert_not_called()
+
+    def test_wait_interrupt_does_not_terminate_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            child = Mock()
+            child.wait.side_effect = [KeyboardInterrupt(), 0]
+            with patch.object(native.subprocess, 'Popen', return_value=child):
+                native.Commands(Path(directory) / 'native.log').run_upgrade(['fixture-upgrader'])
+            self.assertEqual(child.wait.call_count, 2)
+            child.kill.assert_not_called()
+            child.terminate.assert_not_called()
+
+    def test_unsafe_log_parents_and_existing_targets_block_launch(self):
+        for case in ['public-parent', 'writable-ancestor', 'symlink-parent',
+                     'symlink-target', 'existing-target', 'parent-traversal']:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                parent = root / 'logs'
+                parent.mkdir(mode=0o700)
+                log = parent / 'native.log'
+                if case == 'public-parent':
+                    parent.chmod(0o755)
+                elif case == 'writable-ancestor':
+                    root.chmod(0o777)
+                elif case == 'symlink-parent':
+                    link = root / 'linked'
+                    link.symlink_to(parent, target_is_directory=True)
+                    log = link / 'native.log'
+                elif case == 'symlink-target':
+                    log.symlink_to(root / 'untouched')
+                elif case == 'existing-target':
+                    log.write_text('preserve')
+                elif case == 'parent-traversal':
+                    log = parent / '..' / 'native.log'
+                with patch.object(native.subprocess, 'Popen') as launch:
+                    with self.assertRaises((stage.Hold, OSError)):
+                        native.Commands(log).run_upgrade(['fixture-upgrader'])
+                    launch.assert_not_called()
+                if case == 'existing-target':
+                    self.assertEqual(log.read_text(), 'preserve')
+                if case == 'symlink-target':
+                    self.assertFalse((root / 'untouched').exists())
+
+    def test_log_parent_untrusted_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            actual = os.fstat
+            def untrusted(fd):
+                info = actual(fd)
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=123456789)
+            with patch.object(native.os, 'fstat', side_effect=untrusted), \
+                    patch.object(native.subprocess, 'Popen') as launch:
+                with self.assertRaisesRegex(stage.Hold, 'parent_owner'):
+                    native.Commands(Path(directory) / 'native.log').run_upgrade(['fixture-upgrader'])
+                launch.assert_not_called()
+
+    def test_readonly_timeout_and_failure(self):
+        commands = native.Commands('/var/log/private/native.log')
+        with patch.object(native.subprocess, 'run', side_effect=subprocess.TimeoutExpired('fixture', 120)) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                commands.check(['fixture-readonly'])
+            self.assertEqual(run.call_args.kwargs['timeout'], 120)
+        with patch.object(native.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout=b'failure')):
+            with self.assertRaisesRegex(stage.Hold, 'readonly_check_failed'):
+                commands.check(['fixture-readonly'])
+
+    def test_installed_upgrader_ownership_and_integrity(self):
+        safe = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
+        owner = 'ubuntu-release-upgrader-core: ' + native.UPGRADER
+        for case in ['safe', 'owner', 'modified', 'symlink', 'writable', 'nonroot']:
+            with self.subTest(case=case):
+                info = safe
+                if case == 'symlink':
+                    info = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)
+                elif case == 'writable':
+                    info = SimpleNamespace(st_mode=stat.S_IFREG | 0o775, st_uid=0)
+                elif case == 'nonroot':
+                    info = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=1000)
+                commands = Mock()
+                commands.check.side_effect = [owner if case != 'owner' else 'unexpected-package: ' + native.UPGRADER,
+                                              '??5?????? /modified' if case == 'modified' else '']
+                with patch.object(native.Path, 'lstat', return_value=info):
+                    if case == 'safe':
+                        native.verify_installed_upgrader(commands)
+                    else:
+                        with self.assertRaises(stage.Hold):
+                            native.verify_installed_upgrader(commands)
+                if case in ['symlink', 'writable', 'nonroot']:
+                    commands.check.assert_not_called()
 
 
 if __name__ == '__main__':

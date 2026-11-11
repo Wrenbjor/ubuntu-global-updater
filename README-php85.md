@@ -37,7 +37,7 @@ Core CLI/FPM/common packages are selected at exactly upstream **8.5.12**, even i
 APT's candidate is newer. Independently versioned extensions use their matching
 Ubuntu-release candidates. If the exact core packages are absent from enabled
 repository indexes, apply stops before PHP package installation. It never silently
-substitutes a newer patch. CLI and FPM must report exactly8.5.12 before completion.
+substitutes a newer patch. CLI and FPM must report exactly 8.5.12 before completion.
 This is not a permanent APT hold: later package maintenance can change PHP.
 
 This candidate is **not yet a general 135-server fleet migration**. Same-branch
@@ -67,12 +67,30 @@ otherwise it retains that binary in manual mode and reports incomplete rollback.
 Real package/service/VM validation remains required. Do not deploy this candidate
 as the completed fleet updater.
 
-The OS installer remains a separate, older OS-first path ending at24.04. It is
-not yet suitable for PHP-first22.04→24.04→26.04. See `FLEET-UPGRADE-PLAN.md`.
+The OS installer remains a separate, older OS-first path ending at 24.04. It is
+not yet suitable for PHP-first 22.04→24.04→26.04. See `FLEET-UPGRADE-PLAN.md`.
 
-Focused checks: `PHP85_TEST_MOCK_SOCKET=1 python3 -B -m unittest test_php85_shell`.
-This mode explicitly substitutes a regular file for the fixture's Unix socket
-when the test environment prohibits sockets; it does not validate real sockets.
+Source PHP configuration and the full active Nginx dump are checked for drift
+again after taking the worker lock, after APT, and before route replacement.
+Unexpected edits stop migration; the updater does not silently apply a stale
+route or configuration plan. Source configuration symlinks must resolve to files
+inside the source branch. Nginx packages themselves are protected, not upgraded.
+
+Run the offline suite on Linux with real fixture Unix sockets:
+
+```sh
+python3 -B -m unittest discover -v
+bash -n php85.sh
+bash -n forge-php85-recipe.sh
+sha256sum --check PHP85-SHA256SUMS
+python3 -B verify_release.py
+```
+
+The CI workflow repeats this on Ubuntu 22.04 and 24.04. It mocks package/service
+commands and does not replace real PHP/Nginx or OS-upgrade integration tests.
+For an environment that prohibits sockets, explicit
+`PHP85_TEST_MOCK_SOCKET=1` substitutes regular files. That mode does not validate
+Unix sockets and is not the CI default.
 
 ## Forge deployment recipe
 
@@ -82,5 +100,5 @@ Select **root** as the Forge recipe user. Set `UPDATER_COMMIT` and `UPDATER_SHA2
 to a published, reviewed revision before use. Placeholders intentionally fail.
 Default mode is `--plan-only`; set `UPDATER_MODE=--apply` only for an authorized
 maintenance run. This does not invoke the OS installer or reboot the machine.
-The current local candidate has not been published, so its commit cannot yet be
-used as a GitHub download target.
+This WIP branch is published for development review, not approved deployment.
+The template pins remain placeholders until a fleet-ready release is validated.

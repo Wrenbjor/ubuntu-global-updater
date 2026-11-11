@@ -62,7 +62,7 @@ def plan(snapshot, state=None):
     require(snapshot.get('machine_id') and snapshot.get('boot_id'), 'host_and_boot_identity_required')
     release = snapshot['release']
     if state is not None:
-        require(state.get('schema') == 1 and state.get('stage') == 'fleet-os-php-first',
+        require(state.get('schema') == 2 and state.get('stage') == 'fleet-os-php-first',
                 'legacy_or_unknown_checkpoint_preserved')
         require(state.get('machine_id') == snapshot['machine_id'], 'checkpoint_machine_mismatch')
         require(state.get('from_release') in HOPS
@@ -75,7 +75,9 @@ def plan(snapshot, state=None):
                 return {'action': 'reboot-required', 'to_release': release}
             return {'action': 'verify-boot', 'to_release': release}
         require(state.get('accepted_boot_id'), 'verified_boot_receipt_invalid')
-        # Further ordinary reboots are allowed, but never bypass fresh health checks.
+        if snapshot['boot_id'] != state['accepted_boot_id']:
+            return {'action': 'verify-boot', 'to_release': release}
+        # Same-boot health is also checked by advance before another hop/completion.
     require(snapshot.get('legacy_workflow_clear') is True, 'legacy_partial_workflow_requires_review')
     clean(snapshot)
     php_ready(snapshot, SUITES[release])
@@ -116,6 +118,41 @@ def preservation(prepared, snapshot, decision):
         if value['core'] or name in ('php8.5-cli', 'php8.5-common', 'php8.5-fpm'):
             require(value.get('upstream_version') == TARGET_PHP, 'target_PHP_not_exact_8_5_12')
     proofs(prepared, PREFLIGHT)
+
+
+def package_receipt(state, snapshot):
+    """Recheck the complete persisted plan and exact observed package versions.
+
+    The host snapshot must inventory installed versioned PHP packages, including
+    independent extensions. A runtime version string cannot replace this receipt.
+    """
+    prepared = state.get('package_plan')
+    require(isinstance(prepared, dict)
+            and digest(prepared) == state.get('package_plan_sha256'),
+            'missing_or_changed_package_plan_receipt')
+    require(prepared.get('target_suite') == SUITES[state['to_release']],
+            'receipt_target_suite_mismatch')
+    candidates = prepared.get('php_candidates')
+    require(isinstance(candidates, dict) and bool(candidates), 'receipt_PHP_candidates_required')
+    expected = {}
+    for name, value in candidates.items():
+        require(isinstance(name, str) and name.startswith('php8.5-')
+                and isinstance(value, dict) and isinstance(value.get('version'), str)
+                and bool(value['version']) and value.get('authenticated') is True
+                and value.get('suite') == prepared['target_suite']
+                and type(value.get('core')) is bool, 'invalid_PHP_package_receipt')
+        if value['core'] or name in ('php8.5-cli', 'php8.5-common', 'php8.5-fpm'):
+            require(value.get('upstream_version') == TARGET_PHP, 'receipt_PHP_not_exact_8_5_12')
+        expected[name] = value['version']
+    require({'php8.5-cli', 'php8.5-common', 'php8.5-fpm'} <= set(expected),
+            'receipt_PHP_core_packages_missing')
+    php = snapshot.get('php', {})
+    installed = php.get('installed_packages')
+    require(isinstance(installed, list) and all(isinstance(n, str) for n in installed)
+            and len(installed) == len(set(installed)) and set(installed) == set(expected),
+            'postflight_PHP_package_inventory_changed')
+    require(php.get('installed_package_versions') == expected,
+            'postflight_PHP_package_versions_changed_or_missing')
 
 
 class Store:
@@ -189,6 +226,10 @@ def advance(backend, store, apply=False):
     before = backend.snapshot()
     state = store.read()
     decision = plan(before, state)
+    if state is not None and state.get('status') in ('pending-reboot', 'boot-verified'):
+        package_receipt(state, before)
+    if state is not None and state.get('status') == 'boot-verified' and decision['action'] != 'verify-boot':
+        proofs(backend.verify(state), POSTFLIGHT + ('target_kernel_verified',))
     if decision['action'] == 'verify-boot':
         clean(before)
         require(before.get('reboot_required') is False, 'postboot_reboot_still_required')
@@ -206,10 +247,11 @@ def advance(backend, store, apply=False):
         return dict(decision, preflight='verified', package_plan_sha256=digest(prepared))
     require(digest(backend.snapshot()) == digest(before), 'live_baseline_changed')
     previous = copy.deepcopy(state)
-    state = dict(schema=1, stage='fleet-os-php-first', status='installing',
+    state = dict(schema=2, stage='fleet-os-php-first', status='installing',
                  machine_id=before['machine_id'], boot_id=before['boot_id'],
                  from_release=before['release'], to_release=decision['to_release'],
-                 package_plan_sha256=digest(prepared), previous_checkpoint=previous)
+                 package_plan_sha256=digest(prepared), package_plan=copy.deepcopy(prepared),
+                 previous_checkpoint=previous)
     store.write(state)  # Fail closed on interruption BEFORE the first mutation.
     try:
         backend.upgrade(decision, prepared)
@@ -219,6 +261,7 @@ def advance(backend, store, apply=False):
                 and after.get('release') == decision['to_release'], 'hop_exit_identity_or_release_mismatch')
         clean(after)
         php_ready(after, decision['target_suite'])
+        package_receipt(state, after)
         proofs(backend.verify(state), POSTFLIGHT)
         state.update(status='pending-reboot')
         store.write(state)

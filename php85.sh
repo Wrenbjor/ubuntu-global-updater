@@ -59,6 +59,45 @@ done <<<"$routes"
 mapfile -t branches < <(printf '%s\n' "${branches[@]}" | sort -u)
 [[ ${#branches[@]} -eq 1 ]] || die 'Mixed active PHP branches need a per-site migration plan'
 source=${branches[0]}
+# Bind discovery to the source tree before validating it. Package installation
+# must not turn concurrent edits into an unreviewed migration or partial cutover.
+source_tree_fingerprint() {
+python3 -I -B - "$config_root/php/$source" <<'PHP85_SOURCE_TREE'
+import hashlib, json, pathlib, stat, sys
+root=pathlib.Path(sys.argv[1])
+if root.is_symlink() or not root.is_dir():
+    raise SystemExit('STOP: Unsafe source PHP directory')
+rows=[]
+for path in [root,*sorted(root.rglob('*'))]:
+    info=path.lstat()
+    item=[str(path.relative_to(root)),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid]
+    if path.is_symlink():
+        resolved=path.resolve(strict=True)
+        if root not in resolved.parents or not resolved.is_file():
+            raise SystemExit('STOP: External/broken source configuration link: '+str(path))
+        item += ['link',str(path.readlink())]
+    elif path.is_file():
+        item += ['file',hashlib.sha256(path.read_bytes()).hexdigest()]
+    elif path.is_dir():
+        item += ['directory']
+    else:
+        raise SystemExit('STOP: Unsupported source configuration entry: '+str(path))
+    rows.append(item)
+print(hashlib.sha256(json.dumps(rows,separators=(',',':')).encode()).hexdigest())
+PHP85_SOURCE_TREE
+}
+source_fingerprint=$(source_tree_fingerprint)
+assert_discovery_unchanged() {
+    local observed fingerprint
+    observed=$(nginx -T 2>/dev/null) || die 'Nginx configuration verification failed after discovery'
+    [[ $observed == "$dump" ]] || die 'Nginx configuration changed after discovery; refusing stale route/health plan'
+    # Installing PHP 8.5 may legitimately change its own package configuration.
+    # Old-branch configuration is protected and must remain exactly as reviewed.
+    if [[ $source != 8.5 ]]; then
+        fingerprint=$(source_tree_fingerprint) || die 'Source PHP configuration could not be revalidated'
+        [[ $fingerprint == "$source_fingerprint" ]] || die 'Source PHP configuration changed after discovery; refusing unreviewed migration'
+    fi
+}
 mapfile -t files < <(awk '/^# configuration file / {f=$0;sub(/^# configuration file /,"",f);sub(/:$/,"",f)} /^[[:space:]]*fastcgi_pass[[:space:]]/ {print f}' <<<"$dump" | sort -u)
 for i in "${!files[@]}"; do
     files[$i]=$(readlink -f -- "${files[$i]}")
@@ -404,6 +443,7 @@ mkdir -p "$run_root/ubuntu-php-updater"
 chmod 700 "$run_root/ubuntu-php-updater"
 exec 9>"$run_root/ubuntu-php-updater/worker.lock"
 flock -n 9 || die 'Another PHP/Ubuntu updater is running'
+assert_discovery_unchanged
 checkpoint="$home_root/php85-active-run"
 [[ ! -e $checkpoint && ! -L $checkpoint ]] || die "An interrupted/failed rollback needs review: $checkpoint (contains its backup directory). No retry mutations performed."
 backup=$(mktemp -d "$home_root/php85-backup.XXXXXX")
@@ -542,6 +582,7 @@ echo 'Installing/updating PHP 8.5 and matching extensions...'
 # No wall-clock timeout around a running native package transaction.
 apt-get -y --no-remove -o DPkg::Lock::Timeout=60 -o APT::Get::AllowUnauthenticated=false -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${pins[@]}" "${protected[@]}" >>"$backup/apt.log" 2>&1
 [[ -z $cli_before || ! -x $cli_before ]] || update-alternatives --set php "$cli_before" >>"$backup/services.log" 2>&1
+assert_discovery_unchanged
 if [[ $source != 8.5 ]]; then
     snapshot_target_config
     stock=0
@@ -604,6 +645,7 @@ pid=$(systemctl show php8.5-fpm -p MainPID --value)
 fpm_version=$(php-fpm8.5 -v 2>>"$backup/services.log")
 [[ $fpm_version =~ PHP[[:space:]]8\.5\.12[[:space:]] ]] || die 'FPM is not exactly PHP 8.5.12'
 [[ $(. "$config_root/os-release"; echo "$VERSION_ID") == "$VERSION_ID" ]] || die 'Ubuntu release changed during this run'
+assert_discovery_unchanged
 for file in "${files[@]}"; do
     cmp -s "$file" "$backup/$file" || die 'Nginx configuration changed during package installation'
     staged=$(mktemp "$(dirname "$file")/.php85-route.XXXXXX")

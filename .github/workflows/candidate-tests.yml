@@ -1,0 +1,35 @@
+name: Candidate fixture tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    name: Offline fixtures (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify shells and published file checksums
+        run: |
+          bash -n php85.sh
+          bash -n forge-php85-recipe.sh
+          sha256sum --check PHP85-SHA256SUMS
+          python3 -B verify_release.py
+      - name: Run all isolated fixtures with real Unix sockets
+        run: |
+          unset PHP85_TEST_MOCK_SOCKET
+          python3 -B -m unittest discover -v
+      # These fixtures mock apt, systemd, PHP and Nginx commands. A green job is
+      # not a real package migration, application check or LTS-upgrade acceptance.

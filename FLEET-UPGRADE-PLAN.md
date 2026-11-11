@@ -61,3 +61,23 @@ configuration/module cases, failures and reruns. Then validate the complete
 22.04 → 24.04 → 26.04 path with a real guarded backend, package provenance,
 database holds, reboot proof and application checks. Historical stored approvals
 and legacy installer hash verification do not approve these new changes.
+
+## Safety follow-up (2026-11-11)
+
+- PHP discovery now rejects source-configuration or Nginx changes after planning,
+  including changes during APT, before copying settings or changing routes.
+- OS schema-2 receipts retain the full package plan and compare exact installed
+  package names and Debian versions after restoration and after every reboot.
+  Missing extensions, added packages, version drift and old receipts hold.
+- Later boots require separate health acceptance. Even an already accepted boot
+  receives fresh kernel/application verification before completion or another hop.
+- Native log creation pins a private directory descriptor and rejects symlinked,
+  untrusted or ordinarily writable ancestors.
+- Multi-pool fixtures now create every actual Unix socket. Linux CI runs all
+  isolated fixtures on Ubuntu 22.04 and 24.04. No production or full VM upgrade
+  acceptance is implied by these checks.
+
+The PHP stage preserves Nginx package versions while migrating its FPM routes.
+A separate Nginx package-upgrade policy is not implemented. The concrete OS host
+policy and both-hop VM acceptance remain required; the WIP is not a finished
+fleet deployment release.

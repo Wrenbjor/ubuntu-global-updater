@@ -1,5 +1,5 @@
 """Fake FastCGI responder + proc fixtures only; never invoke PHP/FPM/services."""
-import ast,contextlib,os,re,socket,struct,tempfile,threading,time,unittest
+import contextlib,json,os,re,socket,struct,tempfile,threading,time,unittest
 from pathlib import Path
 import php85_runtime as m
 
@@ -59,11 +59,17 @@ def server(root,mode='good'):
         if errors:raise errors[0]
 
 class FastCGIProofs(unittest.TestCase):
-    def test_parent_embedded_runtime_source_exact_byte_identity(self):
-        tree=ast.parse((Path(__file__).parent/'php85_upgrade.py').read_text())
-        source=next(ast.literal_eval(node.value) for node in tree.body if isinstance(node,ast.Assign)
-                    and isinstance(node.targets[0],ast.Name) and node.targets[0].id=='RUNTIME_SOURCE')
-        self.assertEqual(source.encode(),Path(m.__file__).read_bytes())
+    def test_runtime_reference_is_not_claimed_by_active_shell_bundle(self):
+        # This helper is a historical, standalone reference. The active v3 Bash
+        # recipe does not embed its FastCGI proof; testing it must not imply that
+        # the shipped recipe performs these stronger runtime checks.
+        root=Path(__file__).parent
+        review=json.loads((root/'php85-packaging-review.json').read_text())
+        self.assertEqual(review['active_runtime_files'],['php85.sh'])
+        shell=(root/'php85.sh').read_text()
+        for marker in ('RUNTIME_SOURCE','php85_runtime.py','prove_pool('):
+            self.assertNotIn(marker,shell)
+        compile(Path(m.__file__).read_bytes(),'php85_runtime.py','exec')
     def invoke(self,root,path,checker=None):
         checker=checker or (lambda peer,master,api:dict(peer_pid=peer,master_pid=master,current=True))
         return m.prove_pool([path],os.getpid(),'/usr/lib/php/20250925',probe_dir=root,

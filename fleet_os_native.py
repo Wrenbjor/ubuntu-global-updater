@@ -20,6 +20,41 @@ ENVIRONMENT = dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin', HOME='/root', LANG='C',
                    RELEASE_UPGRADER_NO_SCREEN='1')
 
 
+def open_native_log(path):
+    """Create a new log relative to a verified, pinned private directory.
+
+    Walk descriptors without following ancestor symlinks. Root-owned sticky
+    directories such as /tmp may contain the private directory, but ordinary
+    group/world-writable ancestors and non-private final directories are refused.
+    """
+    path = Path(path)
+    require(path.is_absolute() and '..' not in path.parts and len(path.parts) > 1,
+            'unsafe_native_log_path')
+    directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        components = path.parts[1:-1]
+        for index, component in enumerate(components):
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+            os.close(directory)
+            directory = child
+            info = os.fstat(directory)
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.geteuid()),
+                    'unsafe_native_log_parent_owner')
+            if index == len(components) - 1:
+                require(info.st_uid == os.geteuid() and not info.st_mode & 0o077,
+                        'private_native_log_parent_required')
+            else:
+                require(not info.st_mode & 0o022
+                        or (info.st_uid == 0 and info.st_mode & stat.S_ISVTX),
+                        'unsafe_native_log_ancestor')
+        require(bool(components), 'private_native_log_parent_required')
+        return os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                       0o600, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
 class Commands:
     """The package-changing child deliberately has no timeout or kill path."""
     def __init__(self, log):
@@ -33,7 +68,7 @@ class Commands:
         return result.stdout.decode('utf-8', errors='replace')
 
     def run_upgrade(self, arguments):
-        fd = os.open(str(self.log), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        fd = open_native_log(self.log)
         with os.fdopen(fd, 'wb') as output:
             child = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=output,
                                      stderr=subprocess.STDOUT, env=ENVIRONMENT)

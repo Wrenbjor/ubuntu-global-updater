@@ -37,7 +37,8 @@ if name=='nginx':
         done('# configuration file '+str(main)+':\nhttp { include '+str(site)+'; }\n'
             +'# configuration file '+str(site)+':\n'+site.read_text()
             +'\n# configuration file '+str(config/'nginx/fastcgi_params')+':\nfastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n'
-            + ('# configuration file '+str(extra)+':\n'+extra.read_text() if extra.exists() else ''))
+            + ('# configuration file '+str(extra)+':\n'+extra.read_text() if extra.exists() else ''),\
+            1 if scenario.get('nginx_check_fail') and (root/'apt-done').exists() else 0)
     if '-v' in args:done('nginx version: fixture')
     done('')
 if name=='apt-cache':
@@ -52,6 +53,11 @@ if name=='apt-get':
         if scenario.get('protected_change'):done('Inst nginx [1.20.0] (1.22.0 fixture)\n')
         done('Inst php8.5-fpm ('+version+' fixture)\n')
     if 'install' in args and scenario.get('lock_failure'):done('',100)
+    if 'install' in args:(root/'apt-done').touch()
+    if 'install' in args and scenario.get('change_source_during_apt'):
+        with (config/'php/7.4/fpm/php-fpm.conf').open('a') as f:f.write('include=/unreviewed/pools/*.conf\n')
+    if 'install' in args and scenario.get('change_nginx_during_apt'):
+        with (config/'nginx/sites-available/site.conf').open('a') as f:f.write('# concurrent Nginx edit\n')
     done('')
 if name=='add-apt-repository':
     scenario['missing_repo']=False;(root/'scenario.json').write_text(json.dumps(scenario));done('')
@@ -171,14 +177,16 @@ class BashFixtures(unittest.TestCase):
             if scenario.get('extra_pool'):(config/'php/8.5/fpm/pool.d/extra.conf').write_text('[extra]\nlisten=/run/php/extra.sock\n')
             template=root/'usr/share/php8.5-fpm/pool.d/www.conf';template.parent.mkdir(parents=True);template.write_text(stock)
             old=home/'old-checkpoint.json';old.write_bytes(b'old failed evidence\n')
-            (run/'php').mkdir();sock=None
+            (run/'php').mkdir();sockets=[]
             mock_socket=os.environ.get('PHP85_TEST_MOCK_SOCKET')=='1'
             if mock_socket:
                 (run/'php/php8.5-fpm.sock').touch()
                 if scenario.get('multipool'):(run/'php/customer.php85.sock').touch()
             else:
-                sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-                sock.bind(str(run/'php/php8.5-fpm.sock'))
+                names=['php8.5-fpm.sock']+(['customer.php85.sock'] if scenario.get('multipool') else [])
+                for name in names:
+                    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+                    sockets.append(sock);sock.bind(str(run/'php'/name))
             original=SOURCE.read_text();script=original
             if mock_socket:script=script.replace('[[ -S $run_root/${next#/run/} ]]','[[ -f $run_root/${next#/run/} ]]')
             replacements={'config_root=/etc':'config_root='+str(config),'run_root=/run':'run_root='+str(run),
@@ -197,7 +205,7 @@ class BashFixtures(unittest.TestCase):
                     result=subprocess.run(['/bin/bash',str(path)]+args,cwd=root,env=dict(PATH='/usr/bin:/bin',HOME=str(home),LANG='C',LC_ALL='C'),
                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
             finally:
-                if sock is not None:sock.close()
+                for sock in sockets:sock.close()
             calls=[json.loads(line) for line in (root/'commands.jsonl').read_text().splitlines()] if (root/'commands.jsonl').exists() else []
             backups=list(home.glob('php85-backup.*'))
             saved=(backups[0]/str(site).lstrip('/')).read_bytes() if backups and (backups[0]/str(site).lstrip('/')).exists() else None
@@ -206,6 +214,30 @@ class BashFixtures(unittest.TestCase):
             return dict(rc=result.returncode,stdout=result.stdout.decode(),stderr=result.stderr.decode(),calls=calls,
                 shared=(config/'nginx/php-shared.conf').read_text() if (config/'nginx/php-shared.conf').exists() else '',checkpoint=(home/'php85-active-run').exists(),site=site.read_text(),original=text,symlink=enabled.is_symlink(),backup=saved,backup_count=len(backups),
                 global_config=(config/'php/8.5/fpm/php-fpm.conf').read_text() if (config/'php/8.5/fpm/php-fpm.conf').exists() else '',extra_target=(config/'php/8.5/fpm/pool.d/extra.conf').read_text() if (config/'php/8.5/fpm/pool.d/extra.conf').exists() else '',module_links={sapi:sorted(p.name for p in (config/('php/8.5/'+sapi+'/conf.d')).glob('*.ini') if p.is_symlink()) for sapi in ('cli','fpm')},target=target.read_text(),target_mode=target.stat().st_mode&0o777,ready=ready,overlays=overlays,old=old.read_bytes())
+
+    def test_source_configuration_drift_during_apt_blocks_before_migration(self):
+        r=self.exercise({'change_source_during_apt':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertIn('Source PHP configuration changed after discovery',r['stderr'])
+        self.assertEqual(r['site'],r['original'])
+        self.assertNotIn('pm.max_children=8',r['target'])
+        self.assertFalse(any(c[:2]==['systemctl','restart'] for c in r['calls']))
+
+    def test_nginx_configuration_drift_during_apt_is_preserved(self):
+        r=self.exercise({'change_nginx_during_apt':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertIn('Nginx configuration changed after discovery',r['stderr'])
+        self.assertEqual(r['site'],r['original']+'# concurrent Nginx edit\n')
+        self.assertNotIn('pm.max_children=8',r['target'])
+        self.assertFalse(any(c[:2]==['systemctl','restart'] for c in r['calls']))
+
+    def test_failed_nginx_dump_is_rejected_even_when_output_is_unchanged(self):
+        r=self.exercise({'nginx_check_fail':True})
+        self.assertNotEqual(r['rc'],0)
+        self.assertIn('Nginx configuration verification failed after discovery',r['stderr'])
+        self.assertEqual(r['site'],r['original'])
+        self.assertNotIn('pm.max_children=8',r['target'])
+        self.assertFalse(any(c[:2]==['systemctl','restart'] for c in r['calls']))
 
     def test_exact_target_is_pinned(self):
         r=self.exercise({'candidate_version':'8.5.13-1+ubuntu22.04.1+deb.sury.org+1'});self.assertEqual(r['rc'],0,r['stderr'])

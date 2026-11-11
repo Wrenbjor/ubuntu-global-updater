@@ -42,6 +42,8 @@ class Backend:
             raise RuntimeError('fixture failure')
         self.value['release'] = decision['to_release']
         self.value['php']['package_suite'] = decision['target_suite']
+        self.value['php']['installed_package_versions'] = {
+            name: item['version'] for name, item in prepared['php_candidates'].items()}
         if self.bad_php:
             self.value['php']['cli_version'] = '8.5.13'
 
@@ -140,7 +142,7 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(stage.Hold, 'legacy_or_unknown'):
             stage.plan(snapshot('24.04'), {'phase': 'part2-complete'})
         for status in ['installing', 'failed-preserve-no-retry', 'complete']:
-            state = dict(schema=1, stage='fleet-os-php-first', machine_id='machine-one',
+            state = dict(schema=2, stage='fleet-os-php-first', machine_id='machine-one',
                          from_release='22.04', to_release='24.04', status=status)
             with self.assertRaisesRegex(stage.Hold, 'interrupted_or_failed'):
                 stage.plan(snapshot('24.04'), state)
@@ -155,6 +157,90 @@ class LifecycleTests(unittest.TestCase):
                 stage.advance(backend, store, apply=True)
             self.assertEqual(store.read()['status'], 'pending-reboot')
             self.assertEqual(backend.calls, 1)
+
+    def test_old_receipt_is_not_adopted(self):
+        state = dict(schema=1, stage='fleet-os-php-first', machine_id='machine-one',
+                     from_release='22.04', to_release='24.04', status='pending-reboot')
+        with self.assertRaisesRegex(stage.Hold, 'legacy_or_unknown'):
+            stage.plan(snapshot('24.04'), state)
+
+    def test_exact_package_receipt_after_hop_and_boot(self):
+        for phase in ['hop', 'boot']:
+            for change in ['missing', 'extra', 'extension-version', 'core-version', 'no-versions']:
+                with self.subTest(phase=phase, change=change), tempfile.TemporaryDirectory() as directory:
+                    with stage.Store(Path(directory) / 'state') as store:
+                        backend = Backend()
+                        def corrupt():
+                            php = backend.value['php']
+                            if change == 'missing':
+                                php['installed_packages'].remove('php8.5-redis')
+                                del php['installed_package_versions']['php8.5-redis']
+                            elif change == 'extra':
+                                php['installed_packages'].append('php8.5-mysql')
+                                php['installed_package_versions']['php8.5-mysql'] = 'unplanned'
+                            elif change == 'no-versions':
+                                del php['installed_package_versions']
+                            else:
+                                name = 'php8.5-redis' if change == 'extension-version' else 'php8.5-fpm'
+                                php['installed_package_versions'][name] = 'different-revision'
+                        if phase == 'hop':
+                            original = backend.upgrade
+                            def upgrade(decision, prepared):
+                                original(decision, prepared)
+                                corrupt()
+                            backend.upgrade = upgrade
+                        else:
+                            stage.advance(backend, store, apply=True)
+                            backend.value['boot_id'] = 'boot-two'
+                            corrupt()
+                        with self.assertRaises(stage.Hold):
+                            stage.advance(backend, store, apply=True)
+                        self.assertEqual(store.read()['status'],
+                                         'failed-preserve-no-retry' if phase == 'hop' else 'pending-reboot')
+                        self.assertEqual(backend.calls, 1)
+
+    def test_receipt_missing_or_changed_holds(self):
+        for change in ['missing', 'changed']:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                with stage.Store(Path(directory) / 'state') as store:
+                    backend = Backend()
+                    stage.advance(backend, store, apply=True)
+                    state = store.read()
+                    if change == 'missing':
+                        del state['package_plan']
+                    else:
+                        state['package_plan']['php_candidates']['php8.5-redis']['version'] = 'changed'
+                    store.write(state)
+                    backend.value['boot_id'] = 'boot-two'
+                    with self.assertRaisesRegex(stage.Hold, 'package_plan_receipt'):
+                        stage.advance(backend, store, apply=True)
+                    self.assertEqual(store.read(), state)
+
+    def test_accepted_boot_fresh_health_and_separate_later_boot(self):
+        for initial in ['22.04', '24.04']:
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as directory:
+                with stage.Store(Path(directory) / 'state') as store:
+                    backend = Backend(initial)
+                    stage.advance(backend, store, apply=True)
+                    backend.value['boot_id'] = 'boot-two'
+                    stage.advance(backend, store, apply=True)
+                    accepted = store.read()
+                    for boot in ['boot-two', 'boot-three']:
+                        for proof in ['application_health_verified', 'target_kernel_verified']:
+                            backend.value['boot_id'] = boot
+                            backend.proof[proof] = False
+                            with self.assertRaises(stage.Hold):
+                                stage.advance(backend, store, apply=True)
+                            backend.proof[proof] = True
+                            self.assertEqual(store.read(), accepted)
+                            self.assertEqual(backend.calls, 1)
+                    result = stage.advance(backend, store, apply=False)
+                    self.assertEqual(result['action'], 'verify-boot')
+                    self.assertEqual(store.read(), accepted)
+                    result = stage.advance(backend, store, apply=True)
+                    self.assertEqual(result['action'], 'verify-boot')
+                    self.assertEqual(store.read()['accepted_boot_id'], 'boot-three')
+                    self.assertEqual(backend.calls, 1)
 
     def test_store_lock_and_interrupted_write(self):
         with tempfile.TemporaryDirectory() as directory:
