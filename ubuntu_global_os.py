@@ -48,7 +48,12 @@ def replace_bound_private(path,value,expected):
 def old_progress_allowed(value):
  if value is None:return True
  if type(value) is not dict or value.get('error') not in (None,False) or value.get('failed_part') is not None:return False
- return value.get('phase') in ('part1-complete','part2-complete') and value.get('php_phase') in (None,'complete')
+ phase = value.get('phase')
+ php_phase = value.get('php_phase')
+ if phase is None:
+  # The legacy PHP-only workflow records completion without an OS phase.
+  return value.get('error') is None and php_phase == 'complete'
+ return phase in ('part1-complete','part2-complete') and php_phase in (None,'complete')
 def plan(snapshot,checkpoint=None):
  """Pure deterministic next action. Only sequential LTS hops; no downgrade."""
  release=snapshot.get('release')

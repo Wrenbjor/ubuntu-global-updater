@@ -1,4 +1,4 @@
-# Ubuntu global updater v2.2.1
+# Ubuntu global updater v2.2.2
 
 One host-local installer for supported Ubuntu systems across companies and hosting providers: **finish the OS upgrade to
 24.04 first, then migrate legacy PHP to a patched supported PHP8 branch.**
@@ -47,6 +47,13 @@ architecture, bootloader, repository, database and application-layout checks sti
 apply. Unknown providers' repositories require an explicit reviewed source profile;
 they are not enabled or rewritten speculatively. Current supported architecture is
 amd64. Standard Apache same-branch patch profiles are supported; custom/container/application profiles retain compatibility limits.
+
+## Completed PHP-only checkpoints (v2.2.2)
+
+A legacy checkpoint with `php_phase: complete`, no OS phase, and no error can
+pass OS planning. It still goes through the normal package and release-upgrade
+checks. If v2.2.1 already recorded a failed global job on the host, review that
+job separately before launching a new one.
 
 ## Graceful PHP reload verification hotfix (v2.2.1)
 
