@@ -115,7 +115,8 @@ def write_new(path,data,mode=0o600):
 
 def install_bundle(files,allowed_payloads,base=None,
                    wrapper=Path('/root/ubuntu-global-updater.sh'),
-                   unit_paths=None,system_reader=None,start=True,owner_uid=None,recover_preflight=False):
+                   unit_paths=None,system_reader=None,start=True,owner_uid=None,recover_preflight=False,
+                   recover_checkpoint_hold=False):
     uid=os.geteuid() if owner_uid is None else owner_uid
     require(not start or uid==os.geteuid()==0,'root_required')
     selected=layout.installer_layout() if base is None else layout.layout(str(base)) if str(base) in (layout.GENERIC_BASE,layout.LEGACY_BASE) else layout.layout()
@@ -134,11 +135,18 @@ def install_bundle(files,allowed_payloads,base=None,
     try:
         fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         recovery=None
-        if recover_preflight and exists(base/'state.json'):
-            # Explicit recovery is limited to a byte-identified, idle v2.1.1
-            # Apache preflight rejection. It never resumes a package operation.
+        if recover_checkpoint_hold:
+            require(exists(base/'state.json'), 'checkpoint_hold_recovery_requires_existing_job')
+        if (recover_preflight or recover_checkpoint_hold) and exists(base/'state.json'):
             import preflight_recovery
             import ubuntu_global_handoff as handoff
+            checkpoint_hold_manifest = None
+            if recover_checkpoint_hold:
+                matches = [manifest for manifest in allowed_payloads
+                           if preflight_recovery.manifest_digest(manifest) ==
+                           preflight_recovery.CHECKPOINT_HOLD_MANIFEST_SHA]
+                require(len(matches) == 1, 'checkpoint_hold_release_manifest_missing_or_ambiguous')
+                checkpoint_hold_manifest = matches[0]
             try:
                 for name in layout.existing_shared_lock_paths():
                     path=Path(name);directory(path.parent,uid,create=True)
@@ -148,10 +156,13 @@ def install_bundle(files,allowed_payloads,base=None,
                             and not actual.st_mode&0o077,'unsafe_recovery_shared_lock')
                     fcntl.flock(sharedfd,fcntl.LOCK_EX|fcntl.LOCK_NB);shared.append(sharedfd)
                 require(len(unit_paths)>=1,'recovery_unit_path_required')
-                reviewed=preflight_recovery.prepare_recovery(base,wrapper,unit_paths[0],system_reader,lockfd,owner_uid=uid)
+                reviewed=preflight_recovery.prepare_recovery(
+                    base,wrapper,unit_paths[0],system_reader,lockfd,owner_uid=uid,
+                    checkpoint_hold_manifest=checkpoint_hold_manifest)
                 timer_file=base/'unattended-state.json'
                 if exists(timer_file):
                     saved=handoff.load_state(timer_file);system=handoff.System()
+                    require(set(saved)==set(handoff.TIMERS), 'preflight_timer_receipt_incomplete')
                     for name,prior in saved.items():
                         now=system.timer(name)
                         require(now['enabled']==prior['enabled'] and now['active']==prior['active'],
@@ -162,7 +173,9 @@ def install_bundle(files,allowed_payloads,base=None,
                     # reset-failed after daemon-reload may report the removed
                     # unit is not loaded; manager state is verified afterward.
                     require(result.returncode==0 or action=='reset-failed','recovery_unit_control_failed')
-                recovery=preflight_recovery.apply_recovery(reviewed,system_reader,unit_control,lockfd,owner_uid=uid)
+                recovery=preflight_recovery.apply_recovery(
+                    reviewed,system_reader,unit_control,lockfd,owner_uid=uid,
+                    checkpoint_hold_manifest=checkpoint_hold_manifest)
             except Exception:
                 # Outer finally retains admission while releasing shared locks.
                 raise
@@ -188,7 +201,7 @@ def install_bundle(files,allowed_payloads,base=None,
             os.rename(str(staged),str(payload));sync_directory(base)
         if not exists(wrapper):write_new(wrapper,wrapper_bytes,0o700);sync_directory(wrapper.parent)
         no_job(base,unit_paths,system_reader,wrapper,uid)
-        result=dict(status='prelaunch-payload-ready',version='2.2.2',previous_payload_archived=archive.name if archive else None,
+        result=dict(status='prelaunch-payload-ready',version='2.2.3',previous_payload_archived=archive.name if archive else None,
                     source_sha256=new_hashes,application_configuration_changes=0,job_state_changes=0)
         if recovery:result['preflight_recovery']=recovery;result['job_state_changes']='exact_preflight_archived_with_evidence'
         record_fd,record=tempfile.mkstemp(prefix='installation-',suffix='.json',dir=str(base))

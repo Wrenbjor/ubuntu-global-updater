@@ -19,8 +19,8 @@
   "PHP_repository": "existing explicit-key canonical Ondrej only; current suite and enabled state",
   "WSL_restart": "manual distro restart; instance receipt; never host shutdown",
   "company_or_cloud_identity_required": false,
-  "failed_preflight_recovery": "explicit exact v2.1.1 Apache preflight only; all evidence archived",
-  "hotfix": "accept completed legacy PHP-only checkpoints during OS planning",
+  "failed_preflight_recovery": "explicit exact v2.1.1 Apache or v2.2.1 PHP-only checkpoint hold; all evidence archived",
+  "hotfix": "explicit recovery of the v2.2.1 completed PHP-only checkpoint rejection",
   "hotfix_live_package_reload_cycle_tested": false,
   "known_prelaunch_v220_sha256": {
     "apache_php_profile.py": "8a31d6f5d6a1929a6e2c3762728880839362ea4b1f17cc674f924eadf1a0a464",
@@ -53,22 +53,22 @@
     "systemd-enabled-WSL1",
     "systemd-enabled-WSL2"
   ],
-  "prior_release": "2.2.1",
+  "prior_release": "2.2.2",
   "review_date": "2026-10-28",
   "schema": 2,
   "source_sha256": {
-    "README.md": "6d690f599aca6b982f4b6af80e8a26b79f93b339278933b3c90e45948aabf7d2",
+    "README.md": "a9d0c11ab21609f8b25b05bea2d5a5f932892bcba9f20e9e4bfbb43757f8dee6",
     "apache_php_profile.py": "fd24663b6cb4c046dfef9420b80f2ff8646df5b962b1404eb5b0fd741c2ece07",
     "fpm_pool_parser.py": "f2bcd43183791c1f1cb2b4affc17a232ee2184494b16fb9a441f824f36bca00a",
     "health_policy.py": "9b10d5485721305f27b25cb395a99cd03ff036dcc80860acca33b5696832c76b",
     "host_identity.py": "5186a627fd27971c29991b47a2a5739b53a0310934a43e08d01b85a208cb342d",
-    "install.sh": "f4dc54d402b624e79306f60338dc907b258a575bdf6edb86929aec0e8ef36a1a",
+    "install.sh": "c2e04e343f51ac49d6419d385ea92b4ccc2d6440fbe5cb401c7402a6dd56c627",
     "php_legacy_packages.py": "5a081fc018b709b98717d9226d91c2f7971d58ea0ad5480ebb1dd8fdb47abadb",
     "php_legacy_routing.py": "a92b5cf952f77def23e32adfbac5aea540635b2eddd2872ebbdce4dec8e93e79",
     "php_legacy_runner.py": "aec8e2599a45307b32422565a026c42e7f9d04da825d0c3727ba0bbe2c17946e",
     "php_repository.py": "6e79c0c310eb4e43857fd447f24b92dcf0104f3392b4ff0fcbcfae03d937a076",
-    "preflight_recovery.py": "bc9264cca4bc6277a1686d4b0580a7215fdce87a7310e32320b716183138b608",
-    "prelaunch_installer.py": "e9d987398a6b0932784c8b5286894c4fb006d0abdd6c422ebde283d07b7731b8",
+    "preflight_recovery.py": "2ac94a3c72461b2a91082b0655b55c34b1e703afb072e44f5f69a9e2d46080c1",
+    "prelaunch_installer.py": "bafee9f8e317ac2272315dd7fe4a20024bb020df21c4617d643582c6cd2be11f",
     "ubuntu_global.py": "5de998c17356339a71c85bf96b1a282cec3cea627c1c37b2bc64da61716be71c",
     "ubuntu_global_early.py": "67872bb704097189b413a853a942e9cb98599127b692e1c65d2378349c26b3ca",
     "ubuntu_global_guard.py": "6e03904bc5c31f622214828c623200036117a7e425a4083f7dbdd895abffc9bc",
@@ -82,5 +82,5 @@
     "upgrade_state_guard_v10_1.py": "e30ba445cb7fe2a4bc7fd7d8a5da705de5b0794364123df0914a44475694cb06",
     "verify_release.py": "e682040cbb5663ba0b1ed064e9f6610363e9f2c1e9c81b045d64e6a46ebbbb3f"
   },
-  "version": "2.2.2"
+  "version": "2.2.3"
 }

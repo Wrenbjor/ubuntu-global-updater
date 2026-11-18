@@ -1,4 +1,4 @@
-# Ubuntu global updater v2.2.2
+# Ubuntu global updater v2.2.3
 
 One host-local installer for supported Ubuntu systems across companies and hosting providers: **finish the OS upgrade to
 24.04 first, then migrate legacy PHP to a patched supported PHP8 branch.**
@@ -52,8 +52,29 @@ amd64. Standard Apache same-branch patch profiles are supported; custom/containe
 
 A legacy checkpoint with `php_phase: complete`, no OS phase, and no error can
 pass OS planning. It still goes through the normal package and release-upgrade
-checks. If v2.2.1 already recorded a failed global job on the host, review that
-job separately before launching a new one.
+checks. Version 2.2.3 can recover the exact v2.2.1 failure caused by this check.
+
+## Recover the v2.2.1 PHP checkpoint hold
+
+Use this when status reports
+`OS_upgrade_held:prior_failed_or_partial_workflow_preserved` and the older
+checkpoint records a completed PHP-only run. Run as root on the selected host.
+
+```bash
+(
+  set -e
+  installer=$(mktemp)
+  wget --https-only --timeout=30 --tries=1 -O "$installer" \
+    https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/main/install.sh
+  bash "$installer" --recover-checkpoint-hold
+)
+```
+
+The installer verifies the exact v2.2.1 payload, an idle failed unit, host
+identity, the completed legacy PHP receipt, restored APT timers, and evidence
+that package stages never began. It archives the failed global job under
+`/var/lib/ubuntu-global-updater/recovered-preflight-*` and starts a fresh job
+with the normal safety checks. Keep the archive and the legacy PHP checkpoint.
 
 ## Graceful PHP reload verification hotfix (v2.2.1)
 
@@ -122,15 +143,20 @@ For an existing v2.1.1 job stopped specifically by
 archive its code, checkpoint, logs and unit before starting a new job:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/COMMIT/install.sh | sudo bash -s -- --recover-preflight
+(
+  set -e
+  installer=$(mktemp)
+  wget --https-only --timeout=30 --tries=1 -O "$installer" \
+    https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/main/install.sh
+  sudo bash "$installer" --recover-preflight
+)
 ```
 
 Recovery requires exact recognized old code/unit/wrapper, the original host,
 empty completed stages, no running operation or installer, restored timer state,
-private evidence and no OS/package work artifacts. Other failed jobs are never
-reset. An ineligible checkpoint stays preserved. Ordinary reruns still preserve
-existing job state. Status always uses the full `/root/ubuntu-global-updater.sh`
-path; adding it to a user's PATH is unnecessary.
+private evidence and no OS/package work artifacts. Ineligible checkpoints and
+ordinary reruns preserve existing job state. Use the full path
+`/root/ubuntu-global-updater.sh` to check status.
 
 ## Explicit local health exclusions
 
@@ -176,13 +202,15 @@ running or failed job still requires diagnosis; no job checkpoint is deleted.
 
 ## Download and run
 
-Use a reviewed full commit SHA for `COMMIT`, and run as root on the selected host:
+Run as root on the selected host:
 
 ```bash
 (
-  set -o pipefail
-  wget --https-only --timeout=30 --tries=1 -qO- \
-    https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/COMMIT/install.sh | bash
+  set -e
+  installer=$(mktemp)
+  wget --https-only --timeout=30 --tries=1 -O "$installer" \
+    https://raw.githubusercontent.com/Wrenbjor/ubuntu-global-updater/main/install.sh
+  bash "$installer"
 )
 ```
 
@@ -197,9 +225,8 @@ journalctl -fu ubuntu-global-updater.service
 cat /var/lib/ubuntu-global-updater/report.json
 ```
 
-Use the reviewed installer SHA256 for download-first checksum verification when
-preferred. A commit-specific command is provided with publication. Never replace a
-reviewed production commit with a moving `main` URL.
+To pin a reviewed production version, use the exact commit's raw file URL and verify
+the downloaded installer against `SHA256SUMS` from that same commit before running Bash.
 
 ## OS-first behavior and preservation
 
@@ -253,8 +280,9 @@ operator controlled. Raw private logs/backups must never be published.
 
 This remains a **review candidate**: no full live release upgrade or live application
 migration has been exercised for the consolidated bundle. Validate a canary with
-working recovery before wider execution. `validation.json` and
-`publication-review.json` bind this revision's exact files and local evidence.
+working recovery before wider execution. `release.json` and `SHA256SUMS` bind
+the current release files. `validation.json` and `publication-review.json`
+record the earlier v2.2.1 validation and publication review.
 
 ```bash
 python3 -B verify_release.py
